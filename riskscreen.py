@@ -204,19 +204,66 @@ def is_stablecoin(chain_id, address):
     return (str(chain_id), address.lower()) in STABLECOIN_ADDRESSES
 
 
+MIN_ALIGNED_SAMPLES = 30
+MIN_ALIGNED_COVERAGE_RATIO = 0.8
+
+INTERVAL_TO_MS = {
+    "1d": 24 * 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+}
+
+
 def relative_annualized_volatility(stock_klines, quote_klines, interval="1d"):
     """Annualized volatility of log(P_stock / P_quote), for pools quoted against a
     non-stablecoin asset (e.g. bStock/BNB). IL for such a pool depends on the *relative*
     price move between the two pooled assets, not the bStock's volatility alone -- ignoring
     the quote asset's own volatility understates risk whenever it moves too (BNB is not flat).
-    Aligns the two kline series by candle open-time; only the overlapping window is used, so
-    a short overlap (thinly-traded quote asset, gappy data) can still return None.
+
+    Aligns the two kline series by candle open-time and uses only the overlapping window.
+    Two independently-fetched series can intersect into something far sparser or gappier than
+    either series alone (different listing dates, uneven on-chain activity, a missed candle on
+    one leg) -- annualizing a handful of scattered points as if they were a dense daily series
+    would silently understate the true variance and produce a misleadingly precise-looking
+    number. So the result is only trusted once it clears two floors: at least
+    MIN_ALIGNED_SAMPLES aligned candles, and at least MIN_ALIGNED_COVERAGE_RATIO of the
+    theoretical fully-dense span between the first and last aligned candle actually present.
+    Falling short of either floor returns sigma=None with `reason` set, for unscoreable
+    reporting -- never a number computed from data too thin to trust.
+
+    Returns a dict: {sigma, sample_count, coverage_ratio, latest_candle_at, reason}.
     """
     stock_by_time = {c[0]: float(c[4]) for c in stock_klines if float(c[4]) > 0}
     quote_by_time = {c[0]: float(c[4]) for c in quote_klines if float(c[4]) > 0}
     common_times = sorted(set(stock_by_time) & set(quote_by_time))
+    sample_count = len(common_times)
+    latest_candle_at = common_times[-1] if common_times else None
+
+    if sample_count < 2:
+        return {"sigma": None, "sample_count": sample_count, "coverage_ratio": 0.0,
+                "latest_candle_at": latest_candle_at,
+                "reason": f"only {sample_count} aligned candle(s) between the two legs"}
+
+    step_ms = INTERVAL_TO_MS.get(interval, INTERVAL_TO_MS["1d"])
+    span = common_times[-1] - common_times[0]
+    expected_span = step_ms * (sample_count - 1)
+    coverage_ratio = min(expected_span / span, 1.0) if span > 0 else 1.0
+
+    if sample_count < MIN_ALIGNED_SAMPLES:
+        return {"sigma": None, "sample_count": sample_count, "coverage_ratio": coverage_ratio,
+                "latest_candle_at": latest_candle_at,
+                "reason": f"only {sample_count} aligned candles (need >= {MIN_ALIGNED_SAMPLES})"}
+    if coverage_ratio < MIN_ALIGNED_COVERAGE_RATIO:
+        return {"sigma": None, "sample_count": sample_count, "coverage_ratio": coverage_ratio,
+                "latest_candle_at": latest_candle_at,
+                "reason": f"aligned candles too sparse/gappy ({coverage_ratio:.0%} coverage, "
+                          f"need >= {MIN_ALIGNED_COVERAGE_RATIO:.0%})"}
+
     ratios = [stock_by_time[t] / quote_by_time[t] for t in common_times]
-    return _log_return_volatility(ratios, interval)
+    sigma = _log_return_volatility(ratios, interval)
+    return {"sigma": sigma, "sample_count": sample_count, "coverage_ratio": coverage_ratio,
+            "latest_candle_at": latest_candle_at,
+            "reason": None if sigma is not None else "degenerate ratio series"}
 
 
 def resolve_pool_stock_and_quote(pool, info, stock_index):
@@ -255,7 +302,7 @@ def resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode):
     if pair_mode == "stablecoin":
         return best_available_volatility(stock_klines)
     quote_klines = fetch_klines(chain_id, quote_addr, limit=91)
-    return relative_annualized_volatility(stock_klines, quote_klines)
+    return relative_annualized_volatility(stock_klines, quote_klines)["sigma"]
 
 
 def expected_il_fraction(sigma_annual):
@@ -935,9 +982,13 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             # asset moves too -- this was a real bug, not a simplification: NVDAB-BNB,
             # BNB-SPCXB, HOODB-BNB etc. were being scored as if BNB were a stablecoin.
             quote_klines = kline_cache.get((chain_id, quote_addr))
-            sigma = relative_annualized_volatility(stock_klines, quote_klines) if stock_klines and quote_klines else None
+            if stock_klines and quote_klines:
+                rel_vol = relative_annualized_volatility(stock_klines, quote_klines)
+                sigma, vol_reason = rel_vol["sigma"], rel_vol["reason"]
+            else:
+                sigma, vol_reason = None, None
         if sigma is None or sigma <= 0:
-            reason = "insufficient/no overlapping kline history" if pair_mode == "non_stablecoin" \
+            reason = (vol_reason or "insufficient/no overlapping kline history") if pair_mode == "non_stablecoin" \
                 else "insufficient kline history"
             unscoreable.append((pool.get("investmentName"), f"could not compute volatility ({reason})"))
             continue

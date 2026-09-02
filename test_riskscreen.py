@@ -339,35 +339,78 @@ def test_is_stablecoin_false_for_unknown_chain():
 
 # ---- relative_annualized_volatility (the non-stablecoin-pair fix) ----
 
+DAY_MS = 24 * 60 * 60 * 1000
+
+
+def make_klines_at(times, closes):
+    """Kline rows with explicit open-time (ms) and close price -- for alignment/coverage tests."""
+    return [[t, "0", "0", "0", str(c), "0", t] for t, c in zip(times, closes)]
+
+
 def test_relative_volatility_zero_when_ratio_constant():
     # stock and quote move in lockstep -> the ratio series is flat -> zero relative vol,
-    # even though each leg individually has nonzero volatility
-    stock = make_klines([100, 110, 121, 133.1, 146.41])
-    quote = make_klines([10, 11, 12.1, 13.31, 14.641])
-    sigma = relative_annualized_volatility(stock, quote)
-    assert sigma == pytest.approx(0.0, abs=1e-6)
+    # even though each leg individually has nonzero volatility. 30 densely-spaced points to
+    # clear both the sample-count and coverage floors.
+    times = [i * DAY_MS for i in range(30)]
+    stock = make_klines_at(times, [100 * (1.05 ** i) for i in range(30)])
+    quote = make_klines_at(times, [10 * (1.05 ** i) for i in range(30)])
+    result = relative_annualized_volatility(stock, quote)
+    assert result["sigma"] == pytest.approx(0.0, abs=1e-6)
+    assert result["sample_count"] == 30
+    assert result["coverage_ratio"] == pytest.approx(1.0)
+    assert result["latest_candle_at"] == times[-1]
 
 
 def test_relative_volatility_positive_when_ratio_varies():
-    stock = make_klines([100, 105, 98, 110, 95, 103])
-    quote = make_klines([10, 10, 10, 10, 10, 10])  # flat quote -> ratio vol == stock's own vol
-    rel_sigma = relative_annualized_volatility(stock, quote)
+    times = [i * DAY_MS for i in range(30)]
+    stock_closes = [100, 105, 98, 110, 95, 103] * 5
+    stock = make_klines_at(times, stock_closes)
+    quote = make_klines_at(times, [10] * 30)  # flat quote -> ratio vol == stock's own vol
+    result = relative_annualized_volatility(stock, quote)
     stock_sigma = annualized_volatility(stock)
-    assert rel_sigma == pytest.approx(stock_sigma, rel=1e-9)
+    assert result["sigma"] == pytest.approx(stock_sigma, rel=1e-9)
 
 
 def test_relative_volatility_none_without_overlap():
-    stock = [[100 + i, "0", "0", "0", "1", "0", 0] for i in range(5)]  # times 100..104
-    quote = [[200 + i, "0", "0", "0", "1", "0", 0] for i in range(5)]  # times 200..204, no overlap
-    assert relative_annualized_volatility(stock, quote) is None
+    stock = make_klines_at(range(100, 105), [1] * 5)   # times 100..104
+    quote = make_klines_at(range(200, 205), [1] * 5)   # times 200..204, no overlap
+    result = relative_annualized_volatility(stock, quote)
+    assert result["sigma"] is None
+    assert result["sample_count"] == 0
 
 
 def test_relative_volatility_uses_only_overlapping_times():
-    # quote has extra early candles the stock doesn't -- must not crash, must use the overlap
-    stock = make_klines([100, 110, 121, 133.1, 146.41])          # times 0-4
-    quote = [[i, "0", "0", "0", str(c), "0", i] for i, c in enumerate([5, 10, 11, 12.1, 13.31, 14.641])]  # times 0-5
-    sigma = relative_annualized_volatility(stock, quote)
-    assert sigma is not None and sigma >= 0
+    # quote has extra early candles the stock doesn't -- must not crash, must use only the overlap
+    n = 30
+    times = [i * DAY_MS for i in range(n)]
+    stock = make_klines_at(times, [100 * (1.02 ** i) for i in range(n)])
+    extra_times = [-DAY_MS * k for k in range(1, 6)]  # 5 extra early candles stock doesn't have
+    quote = make_klines_at(extra_times + times, [5] * 5 + [10 * (1.01 ** i) for i in range(n)])
+    result = relative_annualized_volatility(stock, quote)
+    assert result["sigma"] is not None and result["sigma"] >= 0
+    assert result["sample_count"] == n
+
+
+def test_relative_volatility_none_when_too_few_aligned_samples():
+    n = 10  # below MIN_ALIGNED_SAMPLES
+    times = [i * DAY_MS for i in range(n)]
+    stock = make_klines_at(times, [100 * (1.03 ** i) for i in range(n)])
+    quote = make_klines_at(times, [10] * n)
+    result = relative_annualized_volatility(stock, quote)
+    assert result["sigma"] is None
+    assert result["sample_count"] == n
+    assert "need >=" in result["reason"]
+
+
+def test_relative_volatility_none_when_coverage_too_sparse():
+    n = 30  # clears the sample-count floor on its own
+    times = [i * DAY_MS * 10 for i in range(n)]  # 10-day gaps between aligned candles
+    stock = make_klines_at(times, [100 * (1.01 ** i) for i in range(n)])
+    quote = make_klines_at(times, [10] * n)
+    result = relative_annualized_volatility(stock, quote)
+    assert result["sigma"] is None
+    assert result["coverage_ratio"] == pytest.approx(0.1, rel=0.05)
+    assert "coverage" in result["reason"]
 
 
 # ---- resolve_pool_stock_and_quote ----
