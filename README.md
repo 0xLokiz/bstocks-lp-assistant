@@ -97,7 +97,7 @@ same factor, so it cancels out of the breakeven equation. It's a property
 of the pool's own APY vs. the token's volatility, not of which range you'd
 choose to hold it in — a much more apples-to-apples comparison across pools
 with wildly different APY/vol magnitudes than a raw APY ranking, or even
-the plain `net_apy` figure alone.
+the plain `model_net_apy` figure alone.
 
 ### Concentrated (V3) ranges: market-making vs. limit orders
 
@@ -116,9 +116,9 @@ concentration multiplier `M = 1 / (1 - √(Pa/Pb))`.
   typically higher, number than the straddling case's no-exit probability.
 
 The tool sweeps a set of candidate ranges/offsets per side and recommends
-the highest `net_apy` among those with **≥60% chance of being active over a
+the highest `model_net_apy` among those with **≥60% chance of being active over a
 year** — that 60% floor is the "safety" side of "safe and high APY"; a
-narrower range can show a higher `net_apy` number but at a `p_active` so low
+narrower range can show a higher `model_net_apy` number but at a `p_active` so low
 it's misleading to call it "safe". Both numbers are always shown together,
 never the APY alone. `range` also prints a **scenario check** on the
 recommended range — the same `[Pa, Pb]` re-priced at 1x/1.5x/2x the
@@ -147,7 +147,7 @@ same as a stablecoin-quoted result.
 
 Passing the pre-deposit screen (below) answers "is this pool safe and
 plausible to consider" — it doesn't answer "is it actually worth doing."
-`recommend` now gates its "Top pick" behind `passes_trade_gate()`: `net_apy`
+`recommend` now gates its "Top pick" behind `passes_trade_gate()`: `model_net_apy`
 must be positive **and** `vol_ratio < 1` (not graded Cheap). Before this,
 `recommend` would print a "Top pick" even when every candidate netted
 negative after IL or graded Cheap — which reads as an endorsement it never
@@ -221,6 +221,18 @@ V4-hook-safety item this doesn't replace.
 
 ## Caveats (read before trusting the numbers)
 
+- **`model_net_apy` is a model estimate, not a promised or historical
+  return** — it's the platform's `apy` minus this tool's modeled IL cost,
+  named `model_net_apy` (not `net_apy`) precisely so it doesn't read as a
+  return you're guaranteed to realize. Separately: the platform's `apy`
+  figure itself is a single blended number. Checked directly against
+  `defi investment-info`'s response on every bStock pool sampled — there is
+  no fee-vs-incentive breakdown, no as-of timestamp, and no
+  lockup/redemption/incentive-expiry field anywhere in that API. That's a
+  confirmed data-availability limit, not an oversight: an incentive-heavy
+  `apy` can look attractive right up until the incentive program ends, with
+  nothing in this tool able to see it coming. Every `scan`/`recommend`
+  output prints this caveat (`model_apy_caveat` in `--json`).
 - **Historical vol is backward-looking.** Stock tokens can gap hard around
   earnings, dividends, splits, and trading halts — check
   `binance-tokenized-securities-info`'s asset-market-status API for upcoming
@@ -245,7 +257,7 @@ scatter for `range`, a vol_ratio comparison for `scan`), not just a raw
 table — see `SKILL.md` → "Visualizing results". Example, from live NVDAB-USDT
 data:
 
-*(chart: p_active on the x-axis, net_apy on the y-axis, one point per
+*(chart: p_active on the x-axis, model_net_apy on the y-axis, one point per
 candidate range, the recommended ±50% range highlighted — see the skill in
 action inside a Claude session for the rendered version)*
 
@@ -461,7 +473,7 @@ review itself recommended:
   correctly via `resolve_pool_stock_and_quote()` + `relative_annualized_volatility()`
   — see "Not every pool is quoted against a stablecoin" above.
 - **`NO_TRADE` as an explicit outcome (P0).** `recommend` no longer prints a
-  "Top pick" when nothing clears `passes_trade_gate()` (positive net_apy,
+  "Top pick" when nothing clears `passes_trade_gate()` (positive model_net_apy,
   vol_ratio < 1) — see "No candidate has to mean NO_TRADE" above.
 - **Scenario stress check on `range`'s recommended range** — Neutral/Elevated/
   Stress at 1x/1.5x/2x the estimated σ, so the recommendation's sensitivity

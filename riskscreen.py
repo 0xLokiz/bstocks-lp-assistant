@@ -375,9 +375,22 @@ def risk_adjusted_apy(apy, sigma_annual):
     il = expected_il_fraction(sigma_annual)
     net = apy - il
     return {
-        "apy": apy, "sigma_annual": sigma_annual, "expected_il": il, "net_apy": net,
+        "apy": apy, "sigma_annual": sigma_annual, "expected_il": il, "model_net_apy": net,
         "vol_ratio": vol_richness_ratio(sigma_annual, apy),
     }
+
+
+# `model_net_apy` is this tool's own estimate (platform apy minus modeled IL), not a promised
+# or historical return. Checked directly against `defi investment-info`'s response shape (see
+# README): the platform's `apy`/`apyBps` is a single blended figure with no fee-vs-incentive
+# split, no as-of timestamp, and no lockup/redemption/incentive-expiry data available through
+# this API on any pool sampled -- so this is a documented data-availability limit, not an
+# oversight. An incentive-heavy apy can look attractive right up until the incentive program
+# ends, with nothing in this tool able to see that coming.
+MODEL_APY_CAVEAT = ("model_net_apy is a model estimate (platform apy minus modeled IL), not a "
+                     "promised or historical return. The platform apy itself is a single blended "
+                     "fee+incentive figure -- no breakdown, timestamp, or lockup/expiry data is "
+                     "available from the API, so an incentive-heavy apy can collapse with no warning.")
 
 
 def _normal_cdf(x):
@@ -493,7 +506,7 @@ def range_metrics(pool_apy, sigma_annual, pa, pb, years=1.0):
     net_apy = effective_apy - expected_il
     return {
         "pa": pa, "pb": pb, "mode": mode, "concentration": m, "p_active": p_active,
-        "effective_apy": effective_apy, "expected_il": expected_il, "net_apy": net_apy,
+        "effective_apy": effective_apy, "expected_il": expected_il, "model_net_apy": net_apy,
         "vol_ratio": vol_richness_ratio(sigma_annual, pool_apy),
     }
 
@@ -526,7 +539,7 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
         rows.append({
             "pa": None, "pb": None, "mode": "market_making", "concentration": 1.0,
             "p_active": 1.0, "effective_apy": pool_apy, "expected_il": il,
-            "net_apy": pool_apy - il, "vol_ratio": vol_richness_ratio(sigma_annual, pool_apy),
+            "model_net_apy": pool_apy - il, "vol_ratio": vol_richness_ratio(sigma_annual, pool_apy),
         })
     elif side == "sell":
         for offset in DEFAULT_SIDED_OFFSETS:
@@ -549,7 +562,7 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
     else:
         raise ValueError(f"unknown side {side!r}")
     safe = [r for r in rows if r["p_active"] >= SAFETY_P_ACTIVE_FLOOR]
-    best = max(safe or rows, key=lambda r: r["net_apy"])
+    best = max(safe or rows, key=lambda r: r["model_net_apy"])
     return rows, best
 
 
@@ -1053,7 +1066,7 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             result["best_range"] = best
         results.append(result)
 
-    results.sort(key=lambda r: r["net_apy"], reverse=True)
+    results.sort(key=lambda r: r["model_net_apy"], reverse=True)
     unscoreable_dicts = [{"pool": name, "reason": reason} for name, reason in unscoreable]
     return results, flagged, unscoreable_dicts
 
@@ -1078,7 +1091,7 @@ def cmd_scan(args):
     capital_note = None
     if args.capital and results:
         top = results[0]
-        capital_note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
+        capital_note = position_sizing_note(args.capital, top["tvl"], top["model_net_apy"])
 
     if args.json:
         # Pure JSON on stdout -- nothing else -- so a scheduler/pipeline can parse it directly.
@@ -1090,6 +1103,7 @@ def cmd_scan(args):
             "flagged": flagged,
             "unscoreable": unscoreable,
             "capital_note": capital_note,
+            "model_apy_caveat": MODEL_APY_CAVEAT,
         }, indent=2))
         return
 
@@ -1102,7 +1116,7 @@ def cmd_scan(args):
             tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['grade']:>7}"
-                  f"{width:>10}{b['net_apy']*100:>10.2f}%{b['confidence']:>12}"
+                  f"{width:>10}{b['model_net_apy']*100:>10.2f}%{b['confidence']:>12}"
                   f"{r['tvl']:>14,.0f}{tag}")
         print("\n(grade = Richness Score tier, vol_ratio bucketed Rich/Fair/Cheap; "
               "confidence = probability of the recommended range staying active a year, "
@@ -1115,7 +1129,7 @@ def cmd_scan(args):
             tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
-                  f"{r['net_apy']*100:>9.2f}%{r['grade']:>7}"
+                  f"{r['model_net_apy']*100:>9.2f}%{r['grade']:>7}"
                   f"{r['tvl']:>14,.0f}{tag}")
         print("\n(grade = Richness Score tier -- realized vol vs. this pool's breakeven vol, "
               "bucketed Rich/Fair/Cheap. [non-stablecoin pair] = vol is the *relative* vol "
@@ -1141,6 +1155,8 @@ def cmd_scan(args):
               f"'flagged' -- these were never scored, safe or not):")
         for u in unscoreable:
             print(f"  {u['pool']}: {u['reason']}")
+
+    print(f"\n{MODEL_APY_CAVEAT}")
 
 
 def cmd_range(args):
@@ -1199,7 +1215,7 @@ def cmd_range(args):
 
     rows, best = recommend_range(apy, sigma, side=args.side,
                                   target_offset=args.target_offset, band_width=args.band_width)
-    if best["net_apy"] <= 0:
+    if best["model_net_apy"] <= 0:
         print("WARNING: every candidate range nets <=0% after estimated IL -- this pool's fee "
               "income does not currently cover the token's volatility risk. 'recommended' below "
               "is the least-bad option, not a genuine opportunity.\n", file=sys.stderr)
@@ -1209,7 +1225,7 @@ def cmd_range(args):
               "sigma is a backward-looking estimate, this shows how much that matters):")
         for label_s, mult in [("Neutral (1x vol)", 1.0), ("Elevated (1.5x vol)", 1.5), ("Stress (2x vol)", 2.0)]:
             stressed = range_metrics(apy, sigma * mult, best["pa"], best["pb"])
-            print(f"  {label_s:<22} net_apy {stressed['net_apy']*100:>8.2f}%   "
+            print(f"  {label_s:<22} net_apy {stressed['model_net_apy']*100:>8.2f}%   "
                   f"confidence {confidence_grade(stressed['p_active'])}")
         print()
     if args.side == "straddle":
@@ -1218,7 +1234,7 @@ def cmd_range(args):
             width = f"+/-{(r['pb']-1)*100:.0f}%" if r["pb"] is not None else "full"
             marker = "  <- recommended" if r is best else ""
             print(f"{width:>10}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
-                  f"{r['effective_apy']*100:>9.2f}%{r['net_apy']*100:>9.2f}%{marker}")
+                  f"{r['effective_apy']*100:>9.2f}%{r['model_net_apy']*100:>9.2f}%{marker}")
         print(f"\n(confidence = probability of staying in range a year, bucketed High/Moderate/Low; "
               f"recommended = best net_apy at Moderate-or-better confidence. Full numbers: --json on scan.)")
     else:
@@ -1229,7 +1245,7 @@ def cmd_range(args):
             tag = " (your target)" if r.get("is_target") else ""
             marker = "  <- recommended" if r is best else ""
             print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
-                  f"{r['net_apy']*100:>9.2f}%{marker}{tag}")
+                  f"{r['model_net_apy']*100:>9.2f}%{marker}{tag}")
         verb = "rises into" if args.side == "sell" else "falls into"
         print(f"\n(yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order -- earns fees "
               f"only once price {verb} the band; confidence = probability that ever happens within a year.)")
@@ -1242,7 +1258,7 @@ def cmd_range(args):
             print(f"\n(--capital given, but this is a --ticker/--apy estimate with no live pool "
                   f"TVL to size a position against -- use --investmentId for position sizing.)")
         else:
-            note = position_sizing_note(args.capital, pool_tvl, best["net_apy"])
+            note = position_sizing_note(args.capital, pool_tvl, best["model_net_apy"])
             print(f"\nAt ${args.capital:,.0f} in the recommended range: "
                   f"~${note['dollar_return']:,.0f}/yr at the current rate, "
                   f"~{note['share_pct']*100:.1f}% of this pool's TVL.")
@@ -1257,7 +1273,7 @@ def passes_trade_gate(result):
     plausible", this answers "is it actually worth doing". Before this existed, `recommend`
     would print a "Top pick" even when every candidate netted negative or graded Cheap,
     which reads as an endorsement it didn't mean to make."""
-    return result["net_apy"] > 0 and result["vol_ratio"] is not None and result["vol_ratio"] < 1
+    return result["model_net_apy"] > 0 and result["vol_ratio"] is not None and result["vol_ratio"] < 1
 
 
 def cmd_recommend(args):
@@ -1284,8 +1300,8 @@ def cmd_recommend(args):
     if not tradeable:
         best = results[0]
         reasons = []
-        if best["net_apy"] <= 0:
-            reasons.append(f"best candidate ({best['pool']}) nets {best['net_apy']*100:.1f}% after IL -- negative")
+        if best["model_net_apy"] <= 0:
+            reasons.append(f"best candidate ({best['pool']}) nets {best['model_net_apy']*100:.1f}% after IL -- negative")
         if best["vol_ratio"] is None or best["vol_ratio"] >= 1:
             vr_str = f"{best['vol_ratio']:.2f}" if best["vol_ratio"] is not None else "n/a"
             reasons.append(f"best candidate grades {best['grade']} (vol_ratio {vr_str}) -- "
@@ -1294,7 +1310,8 @@ def cmd_recommend(args):
         for r in reasons:
             print(f"  - {r}")
         print(f"\nClosest candidate for reference: {best['pool']} ({best['stock_ticker']}), "
-              f"{best['grade']}, {best['net_apy']*100:.1f}% net APY. Not a recommendation.")
+              f"{best['grade']}, {best['model_net_apy']*100:.1f}% net APY. Not a recommendation.")
+        print(f"\n{MODEL_APY_CAVEAT}")
         return
 
     top = tradeable[0]
@@ -1302,14 +1319,14 @@ def cmd_recommend(args):
     width = f"+/-{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full range"
     pair_note = "" if top["pair_mode"] == "stablecoin" else " (non-stablecoin pair -- vol is relative to the quote asset, see README)"
     print(f"Top pick: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
-          f"{width} range at {b['confidence']} confidence, {b['net_apy']*100:.1f}% net APY.{pair_note}\n")
+          f"{width} range at {b['confidence']} confidence, {b['model_net_apy']*100:.1f}% net APY.{pair_note}\n")
 
     print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}")
     for r in results[:3]:
-        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}")
+        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['model_net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}")
 
     if args.capital:
-        note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
+        note = position_sizing_note(args.capital, top["tvl"], top["model_net_apy"])
         print(f"\nAt ${args.capital:,.0f}: ~${note['dollar_return']:,.0f}/yr, "
               f"~{note['share_pct']*100:.1f}% of {top['pool']}'s TVL.")
         if note["warning"]:
@@ -1337,6 +1354,8 @@ def cmd_recommend(args):
               f"run `scan --with-range` for what and why.)")
     if unscoreable:
         print(f"({len(unscoreable)} pool(s) could not be evaluated at all -- data/coverage issue, not a safety verdict.)")
+
+    print(f"\n{MODEL_APY_CAVEAT}")
 
 
 def cmd_positions(args):

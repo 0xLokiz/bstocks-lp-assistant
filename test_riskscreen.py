@@ -534,6 +534,16 @@ def test_evaluate_pool_clean_returns_no_flags_and_scored_data():
     assert "vol_ratio" in result["scored"]
 
 
+def test_evaluate_pool_scored_uses_model_net_apy_key_not_net_apy():
+    # the field is named model_net_apy (not net_apy) precisely so it doesn't read as a
+    # promised/realized return -- see MODEL_APY_CAVEAT. Lock in the contract.
+    pool = {"tvl": "50000", "protocolName": "PancakeSwap V3"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    result = evaluate_pool(pool, info, sigma=0.4, apy=0.5)
+    assert "model_net_apy" in result["scored"]
+    assert "net_apy" not in result["scored"]
+
+
 def test_evaluate_pool_flagged_still_returns_scored_for_transparency():
     pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
@@ -545,22 +555,22 @@ def test_evaluate_pool_flagged_still_returns_scored_for_transparency():
 # ---- passes_trade_gate (the NO_TRADE fix) ----
 
 def test_passes_trade_gate_true_for_rich_positive_net_apy():
-    result = {"net_apy": 0.5, "vol_ratio": 0.2}
+    result = {"model_net_apy": 0.5, "vol_ratio": 0.2}
     assert passes_trade_gate(result)
 
 
 def test_passes_trade_gate_false_for_negative_net_apy():
-    result = {"net_apy": -0.01, "vol_ratio": 0.2}
+    result = {"model_net_apy": -0.01, "vol_ratio": 0.2}
     assert not passes_trade_gate(result)
 
 
 def test_passes_trade_gate_false_for_cheap_grade():
-    result = {"net_apy": 0.1, "vol_ratio": 1.5}  # >= 1 -> Cheap
+    result = {"model_net_apy": 0.1, "vol_ratio": 1.5}  # >= 1 -> Cheap
     assert not passes_trade_gate(result)
 
 
 def test_passes_trade_gate_false_for_unknown_vol_ratio():
-    result = {"net_apy": 0.1, "vol_ratio": None}
+    result = {"model_net_apy": 0.1, "vol_ratio": None}
     assert not passes_trade_gate(result)
 
 

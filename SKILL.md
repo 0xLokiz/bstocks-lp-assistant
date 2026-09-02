@@ -70,7 +70,7 @@ even when the printed grade looks the same.
 ## NO_TRADE is a real, expected outcome
 
 `recommend` gates a "Top pick" behind `passes_trade_gate()`: positive
-`net_apy` **and** `vol_ratio < 1` (not graded Cheap). Passing the
+`model_net_apy` **and** `vol_ratio < 1` (not graded Cheap). Passing the
 pre-deposit safety screen (being in `results` at all) answers "is this
 plausible and safe to consider" — the trade gate answers "is it actually
 worth doing." When nothing clears both bars, `recommend` prints `NO_TRADE`
@@ -153,7 +153,7 @@ fee income and IL by the same factor, so it cancels out of the breakeven
 equation), so it answers "is this pool's APY fundamentally well-priced for
 this token's volatility" before you even get to which range to hold it in.
 Lead with the grade in conversation; cite the raw `vol_ratio` only as
-supporting evidence. `net_apy` (`apy - E[IL]`) is still computed as the
+supporting evidence. `model_net_apy` (`apy - E[IL]`) is still computed as the
 economically intuitive number, but rank primarily on the Richness Score
 when comparing pools with very different APY/vol magnitudes — a huge
 headline APY on an extremely volatile token can still be a worse deal than
@@ -202,27 +202,27 @@ typically a materially *higher* number than a straddling range of similar
 width, because touching one boundary is much easier than never touching
 either of two.
 
-Known simplification for sided ranges: `net_apy` still reuses the
+Known simplification for sided ranges: `model_net_apy` still reuses the
 IL-vs-50/50-hold formula as a generic "cost of providing liquidity here"
 proxy. It does not yet model the effective average execution price versus a
 plain limit order at `Pb` (sell) / `Pa` (buy) — say so if asked how the
 executed price compares to a vanilla limit order.
 
 ```
-recommended = highest net_apy among candidate ranges with p_active >= 60%
+recommended = highest model_net_apy among candidate ranges with p_active >= 60%
 ```
 
 That 60% floor is the "safety" side of "safe and high APY" — a narrower
-range can show a higher `net_apy` number but at a `p_active` so low it's
+range can show a higher `model_net_apy` number but at a `p_active` so low it's
 misleading to call it safe. Always show `p_active` next to any recommended
-range, not just the net_apy figure.
+range, not just the model_net_apy figure.
 
 ## Visualizing results
 
 Use the Artifact tool or the visualize widget (see the `dataviz` skill for
 house style):
 
-- **`range` output**: a scatter of `p_active` (x) vs `net_apy` (y) across
+- **`range` output**: a scatter of `p_active` (x) vs `model_net_apy` (y) across
   the candidate ranges, recommended point visually distinct (larger marker
   / accent color, gray for the rest) — the safety-vs-yield tradeoff the
   user is actually deciding between.
