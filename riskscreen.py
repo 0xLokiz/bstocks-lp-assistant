@@ -55,6 +55,7 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -500,28 +501,76 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
     return rows, best
 
 
+_BAW_SHELL_METACHARACTERS = set('&|<>^%!"\'\r\n\0')
+_BAW_PATH = None
+
+
+def _validate_baw_arg(arg):
+    """Reject anything that could be interpreted as a shell metacharacter.
+
+    Belt-and-suspenders even with shell=False: on Windows, `baw` resolves to a
+    `baw.cmd` npm shim, and CreateProcess's documented fallback for .bat/.cmd targets
+    internally re-invokes cmd.exe regardless of the Python-level shell= flag, so a
+    value built from API data or a CLI flag (investmentId, defiProtocolId, ticker)
+    could still reach cmd.exe's own parser. Blocking its metacharacters here closes
+    that gap without depending on exactly how Windows dispatches the child process.
+    """
+    s = str(arg)
+    if not s:
+        raise ValueError("baw() received an empty argument")
+    bad = _BAW_SHELL_METACHARACTERS & set(s)
+    if bad:
+        raise ValueError(f"baw() argument contains disallowed character(s) {sorted(bad)!r}: {s!r}")
+    return s
+
+
+def _resolve_baw_path():
+    global _BAW_PATH
+    if _BAW_PATH is None:
+        path = shutil.which("baw")
+        if not path:
+            raise RuntimeError("baw CLI not found on PATH -- install the Binance Agentic Wallet CLI first")
+        _BAW_PATH = path
+    return _BAW_PATH
+
+
 def baw(*args):
     """Shell out to the `baw` CLI and parse its --json output.
 
-    On Windows this goes through cmd.exe (shell=True is required to resolve baw.cmd on
-    PATH), whose active codepage defaults to the system locale -- GBK/936 on Chinese
-    Windows -- rather than UTF-8. `baw` (Node) itself writes UTF-8, so a codepage mismatch
-    at the cmd.exe layer can corrupt any non-ASCII text (pool/company names, error messages)
-    into mojibake even though decoding succeeds without raising an error. `chcp 65001` forces
-    the spawned shell into UTF-8 before running the real command, closing that gap.
+    Runs with shell=False against baw's resolved absolute path. On Windows, baw
+    resolves to a `baw.cmd` npm shim, which needs cmd.exe as an interpreter; letting
+    Windows' own CreateProcess .cmd fallback invoke that cmd.exe implicitly was tried
+    and measured to corrupt non-ASCII output (confirmed live: real pool names came
+    back as e.g. 'USDT-\u0163\ufffd\ufffd' instead of their Chinese text), because that
+    implicit cmd.exe uses the system OEM codepage rather than UTF-8. So cmd.exe is
+    invoked explicitly here with `chcp 65001` first, same as before -- the difference
+    from the old implementation is that every argument is validated by
+    _validate_baw_arg to exclude shell metacharacters before being embedded in the
+    command string, which is what actually closes the injection risk (list2cmdline
+    only does CRT-style argv quoting, not shell-metacharacter escaping).
     """
+    baw_path = _resolve_baw_path()
+    validated = [_validate_baw_arg(a) for a in args]
     if os.name == "nt":
-        cmd = "chcp 65001>nul & " + subprocess.list2cmdline(["baw", *args, "--json"])
+        inner = subprocess.list2cmdline([baw_path, *validated, "--json"])
+        comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+        cmd = [comspec, "/d", "/c", f"chcp 65001>nul & {inner}"]
     else:
-        cmd = ["baw", *args, "--json"]
-    result = subprocess.run(cmd, capture_output=True, timeout=30, shell=(os.name == "nt"))
-    result.stdout = result.stdout.decode("utf-8", errors="replace")
-    result.stderr = result.stderr.decode("utf-8", errors="replace")
+        cmd = [baw_path, *validated, "--json"]
+    result = subprocess.run(cmd, capture_output=True, timeout=30, shell=False,
+                             text=True, encoding="utf-8", errors="replace")
     stdout = result.stdout.strip()
     if not stdout:
-        raise RuntimeError(f"baw {' '.join(args)} produced no output (stderr: {result.stderr.strip()})")
+        raise RuntimeError(
+            f"baw {' '.join(args)} produced no output (exit code {result.returncode}, stderr: {result.stderr.strip()})"
+        )
     first_brace = stdout.find("{")
-    return json.loads(stdout[first_brace:] if first_brace > 0 else stdout)
+    try:
+        return json.loads(stdout[first_brace:] if first_brace > 0 else stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"baw {' '.join(args)} produced non-JSON output (exit code {result.returncode}): {stdout[:500]!r}"
+        ) from e
 
 
 def fetch_lp_investments(max_pages=3):
