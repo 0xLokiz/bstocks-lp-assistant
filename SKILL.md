@@ -312,8 +312,12 @@ go-ahead, per that skill's rules.
 
 `rebalance-check --json` emits `{"positions": [...], "any_needs_attention":
 bool}` — `needs_attention` fires per position when it's itself flagged by the
-pre-deposit screen, or when the market has a meaningfully richer alternative
-(>1.5x better vol_ratio) for the same ticker. This is built for the
+pre-deposit screen, when some of it couldn't even be evaluated, or when
+`switching.verdict == "switch"` (a concrete `best_alternative` pool exists
+whose dollar payback period clears `SWITCH_PAYBACK_DAYS_WORTHWHILE`, see
+README "rebalance-check: a concrete alternative, not just a grade" — falls
+back to a bare vol_ratio-multiple check only when the held position's own
+apy couldn't be evaluated). This is built for the
 `schedule` skill: wire a recurring task that runs `rebalance-check --json`
 and only messages the user when `any_needs_attention` is true, rather than a
 daily report regardless of whether anything changed. Still report-only —

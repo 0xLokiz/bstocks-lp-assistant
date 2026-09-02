@@ -165,6 +165,28 @@ meant to make. When nothing clears both bars, `recommend` prints an explicit
 `NO_TRADE` verdict with the specific reason(s), and shows the closest
 candidate for reference only, clearly labeled as not a recommendation.
 
+## rebalance-check: a concrete alternative, not just a grade
+
+Comparing a held pool's grade against "the best grade on the market" told
+you *that* something better might exist, not *what* it was or whether
+moving was actually worth it. For each held position, `rebalance-check` now
+names the actual best alternative pool (`best_alternative`: protocol, TVL,
+apy, `model_net_apy`, `vol_ratio`) and computes a concrete switching
+verdict (`switching`): the position's own USD value (from `defi position`)
+times the `model_net_apy` gap gives an annual dollar gap, weighed against
+`ASSUMED_SWITCH_COST_USD` (a documented ~$2 BSC gas ballpark for a
+remove-liquidity + add-liquidity round trip — a stated assumption, not a
+measured cost, and **not the full switching cost**: it excludes current
+live gas price and any impermanent loss realized at the moment of exit,
+since this tool has no entry-price/cost-basis data to compute that). A
+"switch" verdict only fires when the estimated payback period clears
+`SWITCH_PAYBACK_DAYS_WORTHWHILE` (30 days); otherwise `rebalance-check`
+explicitly says **stay put**, with the gap and payback estimate shown so
+that's a reasoned "not worth it," not silence. `needs_attention` now keys
+off this verdict directly instead of a bare vol_ratio-multiple heuristic
+(kept only as a fallback for when a held position's own apy couldn't be
+evaluated at all, e.g. it's flagged).
+
 ## Pre-deposit risk & plausibility screen
 
 V3/V4 pools can report wildly unreliable `apy` figures, and no single field
@@ -313,7 +335,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 116 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 122 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -503,8 +525,11 @@ release blocker, but real gaps in what the tool actually checks:
   it. Overriding a block that exists specifically because this tool can't
   see hook risk should leave a record of *why*, not just that someone did
   it.
+- **`rebalance-check` names a concrete `best_alternative` and computes a
+  real switching verdict** instead of only comparing grades — see
+  "rebalance-check: a concrete alternative, not just a grade" above.
 
-11 new tests (116 total, up from 105). Every fix verified against live
+17 new tests (122 total, up from 105). Every fix verified against live
 market data — including, for the V4 case, confirming the exact real-world
 pool that the old logic missed.
 

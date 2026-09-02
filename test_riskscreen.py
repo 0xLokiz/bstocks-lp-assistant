@@ -32,6 +32,7 @@ from riskscreen import (
     vol_richness_ratio,
     yang_zhang_volatility,
     _apy_fraction,
+    _best_alternative_for_ticker,
     _exact_double_barrier_no_exit_probability,
     _il_at_price_ratio,
     _load_stablecoin_addresses,
@@ -41,8 +42,10 @@ from riskscreen import (
     _positive_int,
     _rogers_satchell_variance,
     _single_barrier_touch_probability,
+    _switching_recommendation,
     _union_bound_no_exit_probability,
     _v4_override_reason,
+    SWITCH_PAYBACK_DAYS_WORTHWHILE,
 )
 
 
@@ -630,6 +633,56 @@ def test_peer_apys_for_ticker_filters_by_ticker_and_excludes_self():
 def test_peer_apys_for_ticker_empty_when_no_other_pools_on_ticker():
     market_results = [{"stock_ticker": "NVDA", "investmentId": "a", "apy": 0.3}]
     assert _peer_apys_for_ticker("NVDA", market_results, exclude_investment_id="a") == []
+
+
+# ---- _best_alternative_for_ticker / _switching_recommendation (rebalance-check's concrete
+# best_alternative + switching-cost/payback feature) ----
+
+def test_best_alternative_for_ticker_picks_lowest_vol_ratio():
+    market_results = [
+        {"stock_ticker": "NVDA", "investmentId": "a", "vol_ratio": 0.5},
+        {"stock_ticker": "NVDA", "investmentId": "b", "vol_ratio": 0.2},
+        {"stock_ticker": "TSLA", "investmentId": "c", "vol_ratio": 0.1},
+    ]
+    best = _best_alternative_for_ticker("NVDA", market_results)
+    assert best["investmentId"] == "b"
+
+
+def test_best_alternative_for_ticker_excludes_held_ids():
+    market_results = [
+        {"stock_ticker": "NVDA", "investmentId": "a", "vol_ratio": 0.2},
+        {"stock_ticker": "NVDA", "investmentId": "b", "vol_ratio": 0.5},
+    ]
+    best = _best_alternative_for_ticker("NVDA", market_results, exclude_investment_ids={"a"})
+    assert best["investmentId"] == "b"
+
+
+def test_best_alternative_for_ticker_none_when_no_candidates():
+    market_results = [{"stock_ticker": "NVDA", "investmentId": "a", "vol_ratio": 0.2}]
+    assert _best_alternative_for_ticker("NVDA", market_results, exclude_investment_ids={"a"}) is None
+    assert _best_alternative_for_ticker("TSLA", market_results) is None
+
+
+def test_switching_recommendation_switch_for_large_gap_on_big_position():
+    # $50k position, 20pp apy gap -> $10k/yr gap, trivially pays back a ~$2 assumed cost
+    result = _switching_recommendation(position_usd=50_000, held_model_net_apy=0.05, alt_model_net_apy=0.25)
+    assert result["verdict"] == "switch"
+    assert result["payback_days"] < 1
+    assert result["annual_gap_usd"] == pytest.approx(10_000)
+
+
+def test_switching_recommendation_stay_when_alternative_is_worse():
+    result = _switching_recommendation(position_usd=50_000, held_model_net_apy=0.25, alt_model_net_apy=0.05)
+    assert result["verdict"] == "stay"
+    assert result["payback_days"] is None
+    assert result["annual_gap_usd"] < 0
+
+
+def test_switching_recommendation_stay_when_payback_too_slow():
+    # tiny position, tiny gap -> years to pay back the assumed switching cost
+    result = _switching_recommendation(position_usd=10, held_model_net_apy=0.05, alt_model_net_apy=0.06)
+    assert result["verdict"] == "stay"
+    assert result["payback_days"] > SWITCH_PAYBACK_DAYS_WORTHWHILE
 
 
 # ---- passes_trade_gate (the NO_TRADE fix) ----

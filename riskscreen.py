@@ -1447,7 +1447,59 @@ def cmd_positions(args):
         print(f"{h['protocolName']} | {h['stock']['ticker']} | nftId={h['nftId']} | {supply_str}")
 
 
-REBALANCE_ATTENTION_GAP = 1.5  # flag "needs attention" if held vol_ratio is >1.5x the best market alternative
+REBALANCE_ATTENTION_GAP = 1.5  # fallback "needs attention" bar (vol_ratio multiple) when a dollar
+                                 # switching estimate can't be computed -- see _switching_recommendation
+
+# Rough BSC gas ballpark for a remove-liquidity + add-liquidity round trip -- a documented
+# assumption, not a measured cost (this tool has no live gas-price feed). Does NOT include any
+# IL realized at the moment of exit either, since there's no entry-price/cost-basis data
+# available to compute that -- a known, stated gap, not hidden in the number.
+ASSUMED_SWITCH_COST_USD = 2.0
+SWITCH_PAYBACK_DAYS_WORTHWHILE = 30  # "switch" verdict only if the gap pays back this fast
+
+
+def _best_alternative_for_ticker(ticker, market_results, exclude_investment_ids=()):
+    """The best-vol_ratio market survivor for this ticker, excluding pools already held -- a
+    concrete pool (protocol/tvl/apy/model_net_apy/vol_ratio/...), not just a bare ratio number,
+    so rebalance-check can name an actual alternative instead of only comparing grades."""
+    candidates = [r for r in market_results if r["stock_ticker"] == ticker
+                  and r["investmentId"] not in exclude_investment_ids and r["vol_ratio"] is not None]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda r: r["vol_ratio"])
+
+
+def _switching_recommendation(position_usd, held_model_net_apy, alt_model_net_apy):
+    """Whether switching to a concrete alternative pool is worth it, given the position's
+    current USD value and the model_net_apy gap between what's held and the alternative.
+
+    Returns {"verdict": "switch"|"stay", "reason", "annual_gap_usd", "payback_days",
+    "switch_cost_usd_assumed"}. "switch" only when the estimated payback period clears
+    SWITCH_PAYBACK_DAYS_WORTHWHILE -- a real per-position dollar estimate grounded in the
+    position's own USD value, not a bare grade/ratio comparison, but still bounded by what this
+    tool can actually measure: no live gas price, no realized-IL-at-exit data. The reason text
+    says so explicitly whenever a "switch" verdict is given, so the number isn't mistaken for
+    the full real-world cost of moving.
+    """
+    apy_gap = alt_model_net_apy - held_model_net_apy
+    annual_gap_usd = position_usd * apy_gap
+    if annual_gap_usd <= 0:
+        return {"verdict": "stay", "reason": "the alternative doesn't actually net more after IL -- stay put",
+                "annual_gap_usd": annual_gap_usd, "payback_days": None,
+                "switch_cost_usd_assumed": ASSUMED_SWITCH_COST_USD}
+    payback_days = ASSUMED_SWITCH_COST_USD / (annual_gap_usd / 365)
+    if payback_days <= SWITCH_PAYBACK_DAYS_WORTHWHILE:
+        return {"verdict": "switch",
+                "reason": f"~${annual_gap_usd:,.0f}/yr gap pays back the assumed ${ASSUMED_SWITCH_COST_USD:.0f} "
+                          f"switching cost in ~{payback_days:.0f} days -- doesn't include current gas price "
+                          f"or any IL realized on exit",
+                "annual_gap_usd": annual_gap_usd, "payback_days": payback_days,
+                "switch_cost_usd_assumed": ASSUMED_SWITCH_COST_USD}
+    return {"verdict": "stay",
+            "reason": f"gap exists (~${annual_gap_usd:,.0f}/yr) but estimated payback "
+                      f"(~{payback_days:.0f} days) is too slow to bother switching for",
+            "annual_gap_usd": annual_gap_usd, "payback_days": payback_days,
+            "switch_cost_usd_assumed": ASSUMED_SWITCH_COST_USD}
 
 
 def _peer_apys_for_ticker(ticker, market_results, exclude_investment_id=None):
@@ -1465,13 +1517,14 @@ def _evaluate_held_investment_id(investment_id, stock_index, market_results, all
     """Evaluate one held investmentId that fell outside the scanned market set (e.g. ranked
     outside the fetched pages), via the same evaluate_pool() path scan uses -- including
     peer_apys and protocol_security_score, so this fallback can't reach a laxer conclusion
-    than scan would have for the same pool. Returns (vol_ratio_or_None, flags, evaluated)."""
+    than scan would have for the same pool. Returns (vol_ratio, model_net_apy, flags, evaluated)
+    -- the first two are None when flagged or unevaluated."""
     try:
         info = fetch_investment_info(investment_id)
         stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
         sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode) if stock else None
         if not (sigma and sigma > 0):
-            return None, [], False
+            return None, None, [], False
         apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
         peer_apys = _peer_apys_for_ticker(stock["ticker"], market_results, exclude_investment_id=investment_id)
         protocol_id = info.get("defiProtocolId")
@@ -1479,10 +1532,11 @@ def _evaluate_held_investment_id(investment_id, stock_index, market_results, all
         evaluation = evaluate_pool({}, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
                                     block_unknown_v4_hooks=not allow_v4)
         if evaluation["flags"]:
-            return None, evaluation["flags"], True
-        return evaluation["scored"]["vol_ratio"], [], True
+            return None, None, evaluation["flags"], True
+        scored = evaluation["scored"]
+        return scored["vol_ratio"], scored["model_net_apy"], [], True
     except Exception:
-        return None, [], False
+        return None, None, [], False
 
 
 def cmd_rebalance_check(args):
@@ -1529,11 +1583,6 @@ def cmd_rebalance_check(args):
 
     market_by_id = {r["investmentId"]: r for r in market_results}
     flagged_by_id = {f["investmentId"]: f for f in market_flagged}
-    best_ratio_by_ticker = {}
-    for r in market_results:
-        t = r["stock_ticker"]
-        if r["vol_ratio"] is not None and (t not in best_ratio_by_ticker or r["vol_ratio"] < best_ratio_by_ticker[t]):
-            best_ratio_by_ticker[t] = r["vol_ratio"]
 
     if not args.json:
         print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
@@ -1544,26 +1593,31 @@ def cmd_rebalance_check(args):
         for inv_id in inv_ids:
             if inv_id in market_by_id:
                 per_id.append({"investmentId": inv_id, "vol_ratio": market_by_id[inv_id]["vol_ratio"],
+                                "model_net_apy": market_by_id[inv_id]["model_net_apy"],
                                 "flags": [], "evaluated": True})
             elif inv_id in flagged_by_id:
-                per_id.append({"investmentId": inv_id, "vol_ratio": None,
+                per_id.append({"investmentId": inv_id, "vol_ratio": None, "model_net_apy": None,
                                 "flags": flagged_by_id[inv_id]["flags"], "evaluated": True})
             else:
                 # Wasn't in the scanned market set at all (e.g. ranked outside the fetched
                 # pages) -- evaluate it directly via the same evaluate_pool() path rather than
                 # silently skip it.
-                ratio, flags, evaluated = _evaluate_held_investment_id(inv_id, stock_index, market_results,
-                                                                        args.allow_v4)
-                per_id.append({"investmentId": inv_id, "vol_ratio": ratio, "flags": flags, "evaluated": evaluated})
+                ratio, model_apy, flags, evaluated = _evaluate_held_investment_id(
+                    inv_id, stock_index, market_results, args.allow_v4)
+                per_id.append({"investmentId": inv_id, "vol_ratio": ratio, "model_net_apy": model_apy,
+                                "flags": flags, "evaluated": evaluated})
 
         # A held "position" can carry more than one investmentId (see lp_positions_on_stock_tokens);
         # evaluating only the first silently hid risk on the rest. Report every id, and take the
         # worst case across all of them -- a flag on ANY of them means the position is flagged,
-        # and the vol_ratio shown is the worst (highest) among the ones that could be scored, not
-        # an average that a bad instance could hide behind a good one.
+        # the vol_ratio shown is the worst (highest) among the ones that could be scored, and the
+        # model_net_apy used for the switching-cost estimate below is the worst (lowest) among
+        # them too -- never an average that a bad instance could hide behind a good one.
         held_flags = [f for r in per_id for f in r["flags"]]
         evaluated_ratios = [r["vol_ratio"] for r in per_id if r["vol_ratio"] is not None]
         held_ratio = max(evaluated_ratios) if evaluated_ratios else None
+        evaluated_apys = [r["model_net_apy"] for r in per_id if r["model_net_apy"] is not None]
+        held_model_net_apy = min(evaluated_apys) if evaluated_apys else None
         unevaluated_count = sum(1 for r in per_id if not r["evaluated"]) if inv_ids else 1
 
         for f in held_flags:
@@ -1572,27 +1626,46 @@ def cmd_rebalance_check(args):
             log(f"  WARNING: {unevaluated_count}/{len(inv_ids) or 1} investmentId(s) on your held "
                 f"{h['protocolName']} ({h['stock']['ticker']}) position could not be evaluated at all")
 
-        best_market_ratio = best_ratio_by_ticker.get(h["stock"]["ticker"])
+        position_usd = sum(float(t.get("tokenValue") or 0) for t in h["supply"])
+        best_alt = _best_alternative_for_ticker(h["stock"]["ticker"], market_results,
+                                                 exclude_investment_ids=set(inv_ids))
+        best_market_ratio = best_alt["vol_ratio"] if best_alt else None
+        switching = None
+        if best_alt is not None and held_model_net_apy is not None:
+            switching = _switching_recommendation(position_usd, held_model_net_apy, best_alt["model_net_apy"])
 
         # "needs attention": the held pool itself is flagged, some of it couldn't even be
-        # evaluated (silence here is not reassurance), or the market has a meaningfully richer
-        # alternative (>1.5x better vol_ratio) for the same ticker -- that gap bar is
-        # deliberately above "any tiny difference," so a scheduled check (see README) doesn't
-        # cry wolf daily.
-        needs_attention = bool(held_flags) or bool(unevaluated_count) or (
-            held_ratio is not None and best_market_ratio is not None and best_market_ratio > 0
-            and held_ratio > best_market_ratio * REBALANCE_ATTENTION_GAP
-        )
+        # evaluated (silence here is not reassurance), or a concrete alternative's dollar payback
+        # clears the bar in _switching_recommendation. Falls back to the older bare vol_ratio-gap
+        # heuristic only when a dollar estimate couldn't be computed at all (e.g. the held
+        # position's own apy is unavailable) -- still better than no signal.
+        if switching is not None:
+            worth_switching = switching["verdict"] == "switch"
+        else:
+            worth_switching = (
+                held_ratio is not None and best_market_ratio is not None and best_market_ratio > 0
+                and held_ratio > best_market_ratio * REBALANCE_ATTENTION_GAP
+            )
+        needs_attention = bool(held_flags) or bool(unevaluated_count) or worth_switching
+
         if not args.json:
             label = f"{h['protocolName']} ({h['stock']['ticker']})"
             tag = "  <- needs attention" if needs_attention else ""
             if unevaluated_count:
                 tag += f" ({unevaluated_count}/{len(inv_ids) or 1} investmentId(s) unevaluated)"
             print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}{tag}")
+            if best_alt:
+                print(f"  best alternative: {best_alt['pool']} ({best_alt['protocol']}, "
+                      f"${best_alt['tvl']:,.0f} TVL, {best_alt['model_net_apy']*100:.1f}% net APY)")
+            if switching:
+                verdict_label = "SWITCH" if switching["verdict"] == "switch" else "stay put"
+                print(f"  {verdict_label}: {switching['reason']}")
         rows.append({
-            "protocol": h["protocolName"], "ticker": h["stock"]["ticker"],
+            "protocol": h["protocolName"], "ticker": h["stock"]["ticker"], "position_usd": position_usd,
             "held_vol_ratio": held_ratio, "held_grade": richness_grade(held_ratio),
+            "held_model_net_apy": held_model_net_apy,
             "best_market_vol_ratio": best_market_ratio, "best_market_grade": richness_grade(best_market_ratio),
+            "best_alternative": best_alt, "switching": switching,
             "held_flags": held_flags, "investment_ids": per_id,
             "unevaluated_count": unevaluated_count, "needs_attention": needs_attention,
         })
