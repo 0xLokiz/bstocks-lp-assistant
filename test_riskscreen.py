@@ -35,6 +35,7 @@ from riskscreen import (
     _il_at_price_ratio,
     _nonneg_float,
     _offset_fraction,
+    _peer_apys_for_ticker,
     _positive_int,
     _rogers_satchell_variance,
     _single_barrier_touch_probability,
@@ -550,6 +551,23 @@ def test_evaluate_pool_flagged_still_returns_scored_for_transparency():
     result = evaluate_pool(pool, info, sigma=0.4, apy=0.5)
     assert result["flags"] != []
     assert result["scored"]["apy"] == 0.5  # still computed, caller decides whether to show it
+
+
+# ---- _peer_apys_for_ticker (rebalance-check's fallback path getting real peer context) ----
+
+def test_peer_apys_for_ticker_filters_by_ticker_and_excludes_self():
+    market_results = [
+        {"stock_ticker": "NVDA", "investmentId": "a", "apy": 0.3},
+        {"stock_ticker": "NVDA", "investmentId": "b", "apy": 0.5},
+        {"stock_ticker": "TSLA", "investmentId": "c", "apy": 0.9},
+    ]
+    peers = _peer_apys_for_ticker("NVDA", market_results, exclude_investment_id="a")
+    assert peers == [0.5]
+
+
+def test_peer_apys_for_ticker_empty_when_no_other_pools_on_ticker():
+    market_results = [{"stock_ticker": "NVDA", "investmentId": "a", "apy": 0.3}]
+    assert _peer_apys_for_ticker("NVDA", market_results, exclude_investment_id="a") == []
 
 
 # ---- passes_trade_gate (the NO_TRADE fix) ----

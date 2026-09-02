@@ -1402,6 +1402,41 @@ def cmd_positions(args):
 REBALANCE_ATTENTION_GAP = 1.5  # flag "needs attention" if held vol_ratio is >1.5x the best market alternative
 
 
+def _peer_apys_for_ticker(ticker, market_results, exclude_investment_id=None):
+    """Peer apy values for the outlier check, drawn from the already-scanned market survivors
+    on the same ticker. Narrower than run_scan's own peer set (which also includes pools that
+    failed the screen, before they're excluded) since a flagged pool's apy isn't available
+    here -- a documented, minor scope narrowing: it can only make the outlier check slightly
+    less sensitive for this fallback path, never wrongly permissive in a way the rest of the
+    screen wouldn't also independently catch."""
+    return [r["apy"] for r in market_results
+            if r["stock_ticker"] == ticker and r["investmentId"] != exclude_investment_id]
+
+
+def _evaluate_held_investment_id(investment_id, stock_index, market_results, allow_v4):
+    """Evaluate one held investmentId that fell outside the scanned market set (e.g. ranked
+    outside the fetched pages), via the same evaluate_pool() path scan uses -- including
+    peer_apys and protocol_security_score, so this fallback can't reach a laxer conclusion
+    than scan would have for the same pool. Returns (vol_ratio_or_None, flags, evaluated)."""
+    try:
+        info = fetch_investment_info(investment_id)
+        stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
+        sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode) if stock else None
+        if not (sigma and sigma > 0):
+            return None, [], False
+        apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
+        peer_apys = _peer_apys_for_ticker(stock["ticker"], market_results, exclude_investment_id=investment_id)
+        protocol_id = info.get("defiProtocolId")
+        security_score = fetch_protocol_security_score(protocol_id, {}) if protocol_id else None
+        evaluation = evaluate_pool({}, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
+                                    block_unknown_v4_hooks=not allow_v4)
+        if evaluation["flags"]:
+            return None, evaluation["flags"], True
+        return evaluation["scored"]["vol_ratio"], [], True
+    except Exception:
+        return None, [], False
+
+
 def cmd_rebalance_check(args):
     started = time.time()
     log = (lambda msg: None) if args.json else (lambda msg: print(msg, file=sys.stderr))
@@ -1456,51 +1491,61 @@ def cmd_rebalance_check(args):
     rows = []
     for h in held:
         inv_ids = h["investmentIds"] or []
-        held_investment_id = inv_ids[0] if inv_ids else None
-        held_ratio, held_flags = None, []
+        per_id = []
+        for inv_id in inv_ids:
+            if inv_id in market_by_id:
+                per_id.append({"investmentId": inv_id, "vol_ratio": market_by_id[inv_id]["vol_ratio"],
+                                "flags": [], "evaluated": True})
+            elif inv_id in flagged_by_id:
+                per_id.append({"investmentId": inv_id, "vol_ratio": None,
+                                "flags": flagged_by_id[inv_id]["flags"], "evaluated": True})
+            else:
+                # Wasn't in the scanned market set at all (e.g. ranked outside the fetched
+                # pages) -- evaluate it directly via the same evaluate_pool() path rather than
+                # silently skip it.
+                ratio, flags, evaluated = _evaluate_held_investment_id(inv_id, stock_index, market_results,
+                                                                        args.allow_v4)
+                per_id.append({"investmentId": inv_id, "vol_ratio": ratio, "flags": flags, "evaluated": evaluated})
 
-        if held_investment_id and held_investment_id in market_by_id:
-            held_ratio = market_by_id[held_investment_id]["vol_ratio"]
-        elif held_investment_id and held_investment_id in flagged_by_id:
-            held_flags = flagged_by_id[held_investment_id]["flags"]
-        elif held_investment_id:
-            # Held position wasn't in the scanned market set at all (e.g. ranked outside the
-            # fetched pages) -- evaluate it directly via the same evaluate_pool() path rather
-            # than silently skip it.
-            try:
-                info = fetch_investment_info(held_investment_id)
-                stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
-                sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode) if stock else None
-                apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
-                if sigma and sigma > 0:
-                    evaluation = evaluate_pool({}, info, sigma, apy, block_unknown_v4_hooks=not args.allow_v4)
-                    held_flags = evaluation["flags"]
-                    if not held_flags:
-                        held_ratio = evaluation["scored"]["vol_ratio"]
-            except Exception:
-                pass
+        # A held "position" can carry more than one investmentId (see lp_positions_on_stock_tokens);
+        # evaluating only the first silently hid risk on the rest. Report every id, and take the
+        # worst case across all of them -- a flag on ANY of them means the position is flagged,
+        # and the vol_ratio shown is the worst (highest) among the ones that could be scored, not
+        # an average that a bad instance could hide behind a good one.
+        held_flags = [f for r in per_id for f in r["flags"]]
+        evaluated_ratios = [r["vol_ratio"] for r in per_id if r["vol_ratio"] is not None]
+        held_ratio = max(evaluated_ratios) if evaluated_ratios else None
+        unevaluated_count = sum(1 for r in per_id if not r["evaluated"]) if inv_ids else 1
 
         for f in held_flags:
             log(f"  WARNING: your held {h['protocolName']} position itself: {f}")
+        if unevaluated_count:
+            log(f"  WARNING: {unevaluated_count}/{len(inv_ids) or 1} investmentId(s) on your held "
+                f"{h['protocolName']} ({h['stock']['ticker']}) position could not be evaluated at all")
 
         best_market_ratio = best_ratio_by_ticker.get(h["stock"]["ticker"])
 
-        # "needs attention": the held pool itself is flagged, or the market has a meaningfully
-        # richer alternative (>1.5x better vol_ratio) for the same ticker -- a bar deliberately
-        # above "any tiny difference," so a scheduled check (see README) doesn't cry wolf daily.
-        needs_attention = bool(held_flags) or (
+        # "needs attention": the held pool itself is flagged, some of it couldn't even be
+        # evaluated (silence here is not reassurance), or the market has a meaningfully richer
+        # alternative (>1.5x better vol_ratio) for the same ticker -- that gap bar is
+        # deliberately above "any tiny difference," so a scheduled check (see README) doesn't
+        # cry wolf daily.
+        needs_attention = bool(held_flags) or bool(unevaluated_count) or (
             held_ratio is not None and best_market_ratio is not None and best_market_ratio > 0
             and held_ratio > best_market_ratio * REBALANCE_ATTENTION_GAP
         )
         if not args.json:
             label = f"{h['protocolName']} ({h['stock']['ticker']})"
-            print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}"
-                  f"{'  <- needs attention' if needs_attention else ''}")
+            tag = "  <- needs attention" if needs_attention else ""
+            if unevaluated_count:
+                tag += f" ({unevaluated_count}/{len(inv_ids) or 1} investmentId(s) unevaluated)"
+            print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}{tag}")
         rows.append({
             "protocol": h["protocolName"], "ticker": h["stock"]["ticker"],
             "held_vol_ratio": held_ratio, "held_grade": richness_grade(held_ratio),
             "best_market_vol_ratio": best_market_ratio, "best_market_grade": richness_grade(best_market_ratio),
-            "held_flags": held_flags, "needs_attention": needs_attention,
+            "held_flags": held_flags, "investment_ids": per_id,
+            "unevaluated_count": unevaluated_count, "needs_attention": needs_attention,
         })
 
     if args.json:
