@@ -105,17 +105,36 @@ narrower range can show a higher `net_apy` number but at a `p_active` so low
 it's misleading to call it "safe". Both numbers are always shown together,
 never the APY alone.
 
-## Fee-rate sanity check
+## Pre-deposit risk & plausibility screen
 
-V3/V4 pools can report wildly unreliable `apy` figures — most concretely, a
-Uniswap V4 QQQB-USDC pool showed `apy=1,658.77%` against 77.86% on the
-equivalent V3 pool for the same pair, traced to a `feeRate` of `8.38861`
-(838.86% per swap) in `investment-info` — not a valid fee tier, and a strong
-signal the platform's apy computation for that pool is a data or
-dynamic-fee-hook artifact. `riskscreen.py` now filters out any pool with
-`feeRate` above 5% per swap before ranking (`fee_rate_anomaly`), and reports
-what was excluded and why rather than silently dropping it. This is a cheap
-sanity check on the input data, not a hook-security audit — see Roadmap.
+V3/V4 pools can report wildly unreliable `apy` figures, and no single field
+check catches every way that happens — so every pool goes through
+`pool_risk_flags()`, a set of *independent* signals for two questions:
+**is the yield real**, and **is the pool safe**. A pool tripping any signal
+is excluded from ranking, with the reason reported, not silently dropped.
+
+| Signal | Question | What it catches |
+|---|---|---|
+| `feeRate` > 5%/swap | real yield? | a specific mechanism (invalid fee tier / dynamic-fee-hook artifact) |
+| TVL < $5,000 | real yield? | statistically noisy apy from too little liquidity |
+| apy > 5x peer median, same ticker | real yield? | **the general case** — any mechanism, known or not |
+| `investable = false` | safe? | delisted, no new deposits possible |
+| protocol `securityScore` < 50 | safe? | obviously disreputable protocols (weak floor, see below) |
+
+The case that motivated this: a Uniswap V4 QQQB-USDC pool showed
+`apy=1,658.77%` against 77.86% on the equivalent V3 pool for the same pair
+— traced to a `feeRate` of `8.38861` (838.86% per swap, not a valid fee
+tier). A `feeRate` check alone only catches *that* mechanism; the
+peer-outlier check (this pool's apy was 21x its own ticker's peer median)
+independently flagged the same pool without needing to know the cause in
+advance — that's the generalization this section is about.
+
+**Limitation worth stating plainly**: `securityScore` comes from
+`defi protocol-info` and is per-*protocol*, not per-pool or per-hook —
+Uniswap V3 and V4 both score 95.18 because it's the same organization, so
+this signal gave zero warning on the QQQB case. It's a floor against
+disreputable protocols, not a hook audit — see Roadmap for the deeper
+V4-hook-safety item this doesn't replace.
 
 ## Caveats (read before trusting the numbers)
 
@@ -193,7 +212,8 @@ HOODB-BNB           HOOD      123.21%   71.84%   Rich      full    116.76%      
 NVDAB-USDT          NVDA      104.17%   39.59%   Rich       50%    146.78%    Moderate        67,397
 
 1 pool(s) excluded from ranking -- anomalous feeRate:
-  QQQB-USDC (Uniswap V4): feeRate=838.86% per swap outside a sane range -- see "Fee-rate sanity check"
+  QQQB-USDC (Uniswap V4): feeRate=838.86% per swap outside a sane range, and apy is
+  21.3x the peer median -- see "Pre-deposit risk & plausibility screen"
 ```
 
 All eight ranked pools grade **Rich** — the headline APYs genuinely reflect
@@ -232,22 +252,25 @@ advisory role — every fund movement is still a human-confirmed `baw` call.
 
 ## Roadmap
 
-The volatility/IL model prices *market* risk. It currently has nothing to
-say about *pool* risk — a pool can be volatility-cheap and still be a bad
-place to put money if the contract itself is unsafe. Closing that gap is
-the near-term priority; everything below is ordered roughly by how directly
-it extends what's already built.
+The volatility/IL model prices *market* risk. The pre-deposit screen (above)
+now catches implausible-yield and obviously-disreputable-protocol cases, but
+it's still a data-plausibility + reputation check, not a *pool contract*
+security audit — a pool can pass every signal above and still be unsafe if
+the contract itself is broken. Closing that gap is the near-term priority;
+everything below is ordered roughly by how directly it extends what's
+already built.
 
-- **Uniswap V4 hook safety screening.** V4 pools can carry arbitrary custom
-  hook contracts — logic outside the audited core AMM, and a real vector for
+- **Uniswap V4 hook safety audit.** V4 pools can carry arbitrary custom hook
+  contracts — logic outside the audited core AMM, and a real vector for
   malicious or just poorly-written pools (fee-skimming hooks, hooks that
-  block withdrawals, etc.). Before this tool recommends a V4 pool it should
-  check whether the pool has a hook attached and, if so, run/report a
-  security read (audit status, hook permissions, known-bad-hook lists) —
-  the same "don't recommend a deposit outright" caution this project already
-  applies to volatility risk, extended to contract risk. `query-token-audit`
-  covers this checking pattern for tokens already; a pool-level analogue is
-  the gap.
+  block withdrawals, etc.). The pre-deposit screen's `securityScore` check
+  is protocol-level and explicitly does not cover this (Uniswap V3 and V4
+  score identically). What's missing is a pool/hook-level check: whether
+  the pool has a hook attached and, if so, its audit status, permissions,
+  and any known-bad-hook list match — the same "don't recommend a deposit
+  outright" caution this project already applies to volatility risk,
+  extended one layer deeper to contract risk. `query-token-audit` covers
+  this checking pattern for tokens already; a pool-level analogue is the gap.
 - **Robinhood Chain compatibility.** Robinhood has been building a chain for
   its own tokenized-stock offering. If/when RWA stock-token LPs exist there
   with data comparably accessible to Binance's Web3 APIs, extending `stocks`

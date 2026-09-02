@@ -227,20 +227,43 @@ pool and range from this skill's output:
    `defi redeem` / `defi lp-remove` on the old one, then `defi deposit` /
    `defi lp-add` on the new one — two separate confirmed actions, not one.
 
-## Fee-rate sanity check
+## Pre-deposit risk & plausibility screen
 
-`scan`/`range`/`rebalance-check` already filter out pools whose
-`investment-info.feeRate` exceeds 5% per swap (`fee_rate_anomaly` in
-`riskscreen.py`) — a strong signal the reported apy is a data or
-dynamic-fee-hook artifact rather than a durable rate. This has caught real
-cases: a Uniswap V4 QQQB-USDC pool reported `apy=1658.77%` versus 77.86% on
-the equivalent V3 pool for the same pair, driven by a `feeRate` of `8.38861`
-(838.86% per swap — not a valid fee tier). `scan` prints excluded pools with
-the reason rather than silently dropping them; `range --investmentId` warns
-loudly but still shows the numbers if the user explicitly asked for that
-pool by ID — call out clearly that they're unreliable if so. This is a
-cheap data-quality check, not a hook security audit — see the Roadmap in
-README.md for the deeper V4-hook-safety item this doesn't replace.
+Before ranking, every pool goes through `pool_risk_flags()` in
+`riskscreen.py` — independent signals for the two questions that actually
+matter before recommending a deposit: **is the advertised yield even real**,
+and **is the pool safe to put money into**. A pool tripping any signal is
+excluded from ranking, not silently — `scan` lists what was excluded and
+why; `range --investmentId` warns loudly but still shows numbers if a
+specific pool was requested explicitly by ID (say clearly the numbers are
+unreliable if so).
+
+Signals, current set:
+
+| Signal | Question | Catches |
+|---|---|---|
+| `feeRate` > 5%/swap | is the yield real? | a specific mechanism — invalid fee tier / dynamic-fee-hook artifact |
+| TVL < $5,000 | is the yield real? | statistically noisy apy from too little liquidity |
+| apy > 5x peer median (same ticker) | is the yield real? | **the general case** — any mechanism producing an implausible apy, known or not |
+| `investable = false` | is it safe? | delisted product, no new deposits possible |
+| protocol `securityScore` < 50 | is it safe? | obviously disreputable protocols (weak floor — see limitation below) |
+
+The peer-outlier check is the important one to reason about like an
+assistant, not a rule-follower: it's what would have caught the QQQB-USDC
+case (Uniswap V4, `apy=1658.77%` vs. 77.86% on the equivalent V3 pool, 21x
+the peer median) even without knowing the specific cause in advance — a
+`feeRate` check only catches *that* mechanism; a peer-relative check catches
+*any* mechanism that produces an outlier. When you notice a new failure
+mode this set doesn't cover, the fix is another independent signal in
+`pool_risk_flags()`, not a special case bolted onto the feeRate check.
+
+**Known limitation, state it plainly if asked**: `securityScore` is
+per-*protocol*, not per-pool or per-hook — Uniswap V3 and V4 both score
+95.18 because it's the same organization. It cannot catch a malicious or
+broken hook on an otherwise-reputable protocol (exactly the QQQB case:
+Uniswap's own protocol score gave no warning there). This is a cheap
+data-quality + reputation screen, not a hook security audit — the deeper
+V4-hook-safety item is tracked in the README Roadmap and remains open.
 
 ## Before presenting results to the user
 

@@ -308,8 +308,20 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0):
 
 
 def baw(*args):
-    result = subprocess.run(["baw", *args, "--json"], capture_output=True, timeout=30,
-                             shell=(os.name == "nt"))
+    """Shell out to the `baw` CLI and parse its --json output.
+
+    On Windows this goes through cmd.exe (shell=True is required to resolve baw.cmd on
+    PATH), whose active codepage defaults to the system locale -- GBK/936 on Chinese
+    Windows -- rather than UTF-8. `baw` (Node) itself writes UTF-8, so a codepage mismatch
+    at the cmd.exe layer can corrupt any non-ASCII text (pool/company names, error messages)
+    into mojibake even though decoding succeeds without raising an error. `chcp 65001` forces
+    the spawned shell into UTF-8 before running the real command, closing that gap.
+    """
+    if os.name == "nt":
+        cmd = "chcp 65001>nul & " + subprocess.list2cmdline(["baw", *args, "--json"])
+    else:
+        cmd = ["baw", *args, "--json"]
+    result = subprocess.run(cmd, capture_output=True, timeout=30, shell=(os.name == "nt"))
     result.stdout = result.stdout.decode("utf-8", errors="replace")
     result.stderr = result.stderr.decode("utf-8", errors="replace")
     stdout = result.stdout.strip()
@@ -326,27 +338,77 @@ def fetch_lp_investments():
     return body["data"]["list"]
 
 
-MAX_SANE_FEE_RATE = 0.05  # 5% per swap -- generous; real fee tiers top out around 1%
+MAX_SANE_FEE_RATE = 0.05      # 5% per swap -- generous; real fee tiers top out around 1%
+MIN_SANE_TVL_USD = 5_000       # below this, a single trade can dominate the annualized apy
+PEER_APY_OUTLIER_MULTIPLE = 5  # flag if > 5x the median apy of other pools on the same ticker
+MIN_PROTOCOL_SECURITY_SCORE = 50  # `defi protocol-info` securityScore floor (0-100)
 
 
-def fee_rate_anomaly(info):
-    """Flag a pool whose `feeRate` (fraction per swap) is outside a sane range -- a strong
-    signal the platform's reported apy/apyBps for this pool is a data or dynamic-fee-hook
-    artifact, not a durable rate. V4 pools can carry custom hooks with arbitrary (including
-    broken or malicious) fee logic; this is a cheap sanity check, not a full hook audit --
-    see README/SKILL.md roadmap for the latter. Returns a warning string, or None if sane.
+def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
+    """Aggregate pre-deposit sanity/safety screen for one LP pool -- generalizes the original
+    single feeRate check into independent signals for the two questions that actually matter
+    before recommending a deposit: is the advertised yield even real (data-plausibility), and
+    is the pool safe to put money into (deposit risk)? Returns a list of human-readable flag
+    strings; empty = no flags raised. A pool can trip more than one signal.
+
+    Data-plausibility signals (apy may not be real):
+      - feeRate outside a sane per-swap range (catches the exact QQQB-USDC V4 case: a
+        feeRate of 838.86%/swap produced apy=1658.77% vs 77.86% on the equivalent V3 pool).
+      - TVL below a floor where a single trade can dominate the annualized apy estimate.
+      - apy is a large outlier versus other pools on the *same* underlying ticker -- this is
+        the general form of the feeRate check: it catches any mechanism (stale data, a
+        calculation bug, a temporary spike, a hook doing something unexpected) that produces
+        an implausible apy, not just the one specific cause already identified once.
+
+    Deposit-risk signals (money going in may not be safe):
+      - `investable=false` -- delisted, no new deposits possible.
+      - protocol-level `securityScore` (from `defi protocol-info`) below a floor.
+        IMPORTANT LIMITATION: this score is per-*protocol*, not per-pool or per-hook -- Uniswap
+        V3 and V4 pools both score 95.18 because it's the same organization, so it CANNOT catch
+        a malicious/broken hook on an otherwise-reputable protocol (that's exactly the QQQB
+        case: Uniswap's own score gives no warning). This signal is a weak floor against
+        obviously disreputable protocols, not a substitute for the hook-level audit tracked in
+        the README roadmap -- do not present it as though it clears a V4 pool as hook-safe.
     """
+    flags = []
+
     fee_rate = info.get("feeRate")
-    if fee_rate is None:
-        return None
-    try:
-        fee_rate = float(fee_rate)
-    except (TypeError, ValueError):
-        return None
-    if fee_rate > MAX_SANE_FEE_RATE:
-        return (f"feeRate={fee_rate*100:.2f}% per swap is outside a sane range (>{MAX_SANE_FEE_RATE*100:.0f}%) "
-                f"-- its apy figure is likely a data or dynamic-fee-hook artifact, not a trustworthy rate")
-    return None
+    if fee_rate is not None:
+        try:
+            fee_rate = float(fee_rate)
+            if fee_rate > MAX_SANE_FEE_RATE:
+                flags.append(f"feeRate={fee_rate*100:.2f}%/swap exceeds a sane range (>{MAX_SANE_FEE_RATE*100:.0f}%) "
+                              f"-- apy is likely a data or dynamic-fee-hook artifact")
+        except (TypeError, ValueError):
+            pass
+
+    tvl = float(pool.get("tvl") or info.get("tvl") or 0)
+    if tvl < MIN_SANE_TVL_USD:
+        flags.append(f"TVL ${tvl:,.0f} is below ${MIN_SANE_TVL_USD:,.0f} -- apy from this little "
+                      f"liquidity is statistically noisy, easily swung by a single trade")
+
+    apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
+    if peer_apys:
+        others = sorted(a for a in peer_apys if a != apy)
+        if others:
+            median = others[len(others) // 2]
+            if median > 0 and apy > median * PEER_APY_OUTLIER_MULTIPLE:
+                flags.append(f"apy is {apy/median:.1f}x the median ({median*100:.1f}%) of other pools "
+                              f"on the same token -- outlier, treat as unverified until explained")
+
+    if info.get("investable") is False:
+        flags.append("product is delisted (investable=false) -- no new deposits possible")
+
+    if protocol_security_score is not None:
+        try:
+            score = float(protocol_security_score)
+            if score < MIN_PROTOCOL_SECURITY_SCORE:
+                flags.append(f"protocol security score {score:.0f}/100 is below {MIN_PROTOCOL_SECURITY_SCORE} "
+                              f"-- elevated smart-contract risk at the protocol level")
+        except (TypeError, ValueError):
+            pass
+
+    return flags
 
 
 def fetch_investment_info(investment_id):
@@ -354,6 +416,21 @@ def fetch_investment_info(investment_id):
     if not body.get("success"):
         raise RuntimeError(json.dumps(body.get("error", body)))
     return body["data"]
+
+
+def fetch_protocol_security_score(defi_protocol_id, cache):
+    """Cached lookup of a protocol's securityScore via `defi protocol-info`. Score is
+    per-protocol (shared across e.g. Uniswap V3 and V4), so cache by defiProtocolId to
+    avoid a repeat API call per pool on the same protocol."""
+    if defi_protocol_id in cache:
+        return cache[defi_protocol_id]
+    try:
+        body = baw("defi", "protocol-info", "--defiProtocolId", defi_protocol_id)
+        score = body["data"].get("securityScore") if body.get("success") else None
+    except Exception:
+        score = None
+    cache[defi_protocol_id] = score
+    return score
 
 
 def fetch_positions(refresh=False):
@@ -448,8 +525,9 @@ def cmd_scan(args):
 
     print(f"found {len(candidates)}/{len(pools)} LP pools naming a tokenized-stock symbol", file=sys.stderr)
 
-    results = []
-    flagged = []
+    # Pass 1: resolve each candidate's stock/vol/apy, without deciding risk flags yet --
+    # the peer-outlier check needs every ticker's full apy list first.
+    prepared = []
     vol_cache = {}
     for pool, name_hit in candidates:
         try:
@@ -457,11 +535,6 @@ def cmd_scan(args):
         except Exception:
             continue
         time.sleep(0.1)
-
-        anomaly = fee_rate_anomaly(info)
-        if anomaly:
-            flagged.append((pool.get("investmentName"), pool.get("protocolName"), anomaly))
-            continue
 
         chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
         asset_list = info.get("assetTokenList") or []
@@ -491,6 +564,26 @@ def cmd_scan(args):
             apy = float(info["apyBps"]) / 10000
         else:
             apy = float(pool.get("apy") or 0)
+
+        prepared.append({"pool": pool, "info": info, "stock": stock, "sigma": sigma, "apy": apy})
+
+    # Pass 2: apply the risk/plausibility screen with full peer context, then score the survivors.
+    apys_by_ticker = {}
+    for p in prepared:
+        apys_by_ticker.setdefault(p["stock"]["ticker"], []).append(p["apy"])
+
+    security_score_cache = {}
+    results = []
+    flagged = []
+    for p in prepared:
+        pool, info, stock, sigma, apy = p["pool"], p["info"], p["stock"], p["sigma"], p["apy"]
+        protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
+        security_score = fetch_protocol_security_score(protocol_id, security_score_cache) if protocol_id else None
+        flags = pool_risk_flags(pool, info, peer_apys=apys_by_ticker.get(stock["ticker"]),
+                                 protocol_security_score=security_score)
+        if flags:
+            flagged.append((pool.get("investmentName"), pool.get("protocolName"), flags))
+            continue
 
         scored = risk_adjusted_apy(apy, sigma)
         result = {
@@ -534,9 +627,11 @@ def cmd_scan(args):
               "bucketed Rich/Fair/Cheap. Full numbers: --json.)")
 
     if flagged:
-        print(f"\n{len(flagged)} pool(s) excluded from ranking -- anomalous feeRate:")
-        for name, protocol, anomaly in flagged:
-            print(f"  {name} ({protocol}): {anomaly}")
+        print(f"\n{len(flagged)} pool(s) excluded from ranking -- pre-deposit screen flagged:")
+        for name, protocol, flags in flagged:
+            print(f"  {name} ({protocol}):")
+            for f in flags:
+                print(f"    - {f}")
 
     if args.json:
         print(json.dumps(results[: args.top], indent=2))
@@ -545,9 +640,11 @@ def cmd_scan(args):
 def cmd_range(args):
     if args.investment_id:
         info = fetch_investment_info(args.investment_id)
-        anomaly = fee_rate_anomaly(info)
-        if anomaly:
-            print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}): {anomaly}", file=sys.stderr)
+        flags = pool_risk_flags({}, info)
+        if flags:
+            print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}) failed the pre-deposit screen:", file=sys.stderr)
+            for f in flags:
+                print(f"  - {f}", file=sys.stderr)
             print("Proceeding anyway since an investmentId was given explicitly, but treat every "
                   "number below as unreliable -- do not recommend this pool.\n", file=sys.stderr)
         apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
@@ -653,9 +750,9 @@ def cmd_rebalance_check(args):
                 info = fetch_investment_info(inv_id)
             except Exception:
                 continue
-            held_anomaly = fee_rate_anomaly(info)
-            if held_anomaly:
-                print(f"  WARNING: your held {h['protocolName']} position itself: {held_anomaly}")
+            held_flags = pool_risk_flags({}, info)
+            for f in held_flags:
+                print(f"  WARNING: your held {h['protocolName']} position itself: {f}")
             apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
             sigma = annualized_volatility(klines)
@@ -671,7 +768,7 @@ def cmd_rebalance_check(args):
                 info = fetch_investment_info(m["investmentId"])
             except Exception:
                 continue
-            if fee_rate_anomaly(info):
+            if pool_risk_flags(m, info):
                 continue
             apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
