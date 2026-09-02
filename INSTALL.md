@@ -40,23 +40,31 @@ scanned at session start.
 
 ## Step 2 — Just talk to Claude
 
-Once installed, you don't need to remember any command syntax. Ask things
-like:
+Once installed, you don't need to remember any command syntax. If you don't
+know where to start, just ask:
 
-- "哪个股票代币 LP 池风险调整后最划算？" — *which stock-token LP pool is
-  actually worth it once you account for risk?*
+- "我该怎么配置我的 bStocks LP？" — *what should I do with my bStocks LPs?*
+  (this is the one to lead with — Claude runs `recommend` and gives you one
+  verdict instead of making you pick a more specific question first)
+
+Or ask something more specific:
+
+- "哪个股票代币 LP 池风险调整后最划算？我打算存 1 万刀" — *which stock-token
+  LP pool is actually worth it, accounting for risk? I'm putting in $10k*
+  (the dollar amount gets you a concrete $/yr estimate and a warning if
+  you'd end up owning too much of the pool)
 - "TSLA 这个池子选多宽的区间比较好？" — *what price range should I pick for
   a TSLA LP position?*
-- "我想在 NVDA 涨到某个价位的时候卖出，能不能用 LP 顺便赚点手续费？" —
-  *I want to sell NVDA once it hits a certain price — can an LP range do
-  that while earning fees along the way?*
+- "我想在 NVDA 涨到 $310 的时候卖出，能不能用 LP 顺便赚点手续费？" —
+  *I want to sell NVDA once it hits $310 — can an LP range do that while
+  earning fees along the way?* (an exact target price, not just presets)
 - "我现在的 LP 仓位要不要调整？" — *should I rebalance my current LP
   positions?*
 - "这个池子最近有没有财报之类的事件要注意？" — *any upcoming corporate
   action I should know about before entering this pool?*
 
-Claude reads `SKILL.md`, decides which of the six `riskscreen.py` commands
-to run (`stocks` / `vol` / `scan` / `range` / `positions` /
+Claude reads `SKILL.md`, decides which of the seven `riskscreen.py` commands
+to run (`recommend` / `stocks` / `vol` / `scan` / `range` / `positions` /
 `rebalance-check`), and shows the result as a chart plus a short
 explanation — including the caveats (which range model produced the number,
 a breakeven-volatility read on whether the pool is a good deal, pending
@@ -85,13 +93,14 @@ If you'd rather run it yourself:
 ```bash
 git clone https://github.com/0xLokiz/bstocks-lp-assistant
 cd bstocks-lp-assistant
-python riskscreen.py scan --top 15 --with-range        # needs a signed-in baw session
-python riskscreen.py range --investmentId <id>          # market-making ranges
-python riskscreen.py range --investmentId <id> --side sell   # limit-sell-style range
+python riskscreen.py recommend --capital 10000          # one verdict, needs a signed-in baw session
+python riskscreen.py scan --top 15 --with-range          # the thorough version
+python riskscreen.py range --investmentId <id>            # market-making ranges
+python riskscreen.py range --investmentId <id> --side sell --target-offset 0.15   # sell at +15%
 python riskscreen.py positions
-python riskscreen.py rebalance-check
-python riskscreen.py stocks --limit 20                  # no auth needed
-python riskscreen.py vol --ticker TSLA --apy 0.30        # no auth needed
+python riskscreen.py rebalance-check --json               # --json for scheduled monitoring
+python riskscreen.py stocks --limit 20                    # no auth needed
+python riskscreen.py vol --ticker TSLA --apy 0.30          # no auth needed
 ```
 
 See [README.md](README.md) for the model behind the numbers and

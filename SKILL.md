@@ -1,6 +1,6 @@
 ---
 name: bstocks-lp-assistant
-description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks) pools. Ranks pools by a breakeven-volatility "is this vol richly priced" score (not raw APY), recommends a concentrated-liquidity price range -- symmetric market-making, or a single-sided range used as a yield-enhanced limit buy/sell order -- and checks held LP positions against the current market. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, use an LP range to buy/sell at a target price, screen for risk-adjusted yield, review their current LP positions, or asks whether to rebalance. Does not execute deposits/withdrawals itself -- see "Executing a recommendation" below.
+description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks) pools. Ranks pools by a breakeven-volatility "is this vol richly priced" score (not raw APY), recommends a concentrated-liquidity price range -- symmetric market-making, or a single-sided range used as a yield-enhanced limit buy/sell order at an exact target price -- sizes a position against pool TVL (concentration warning), and checks held LP positions against the current market, including a scheduled-monitoring mode. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, use an LP range to buy/sell at a target price, screen for risk-adjusted yield, size a deposit, review their current LP positions, or asks whether to rebalance -- or asks an open-ended "what should I do with my bStocks LPs" question (use `recommend`). Does not execute deposits/withdrawals itself -- see "Executing a recommendation" below.
 ---
 
 # bStocks LP Assistant
@@ -183,17 +183,23 @@ figures) — the chart supplements it, it doesn't replace it.
 ## Commands
 
 ```bash
+# single entry point -- one verdict, no need to pick which command to run (needs baw session)
+python riskscreen.py recommend [--capital 10000] [--max-pages 1]
+
 # tokenized-stock token list (public API, no auth)
 python riskscreen.py stocks --limit 20 [--type 1|2|3]
 
-# annualized volatility + est. IL (+ breakeven vol if --apy given) for one ticker (public API, no auth)
+# annualized volatility + est. IL (+ Richness Score if --apy given) for one ticker (public API, no auth)
 python riskscreen.py vol --ticker <TICKER> [--days 30] [--apy 0.30]
 
 # rank stock-token LP pools by vol_ratio / net APY (needs signed-in baw session)
-python riskscreen.py scan --top 15 [--json] [--with-range]
+python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000]
+  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000]
+  [--peer-outlier-multiple 5] [--min-security-score 50]
 
 # range-by-range IL/APY breakdown + recommended range for one pool
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+  [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # without a live pool
 
 # current LP positions on tokenized-stock pairs (needs signed-in baw session)
@@ -201,15 +207,54 @@ python riskscreen.py positions [--refresh] [--json]
 
 # compare held positions' vol_ratio against the current market
 # (report only — see "Executing a recommendation")
-python riskscreen.py rebalance-check
+python riskscreen.py rebalance-check [--json]
 ```
 
-All commands that touch `baw` (`scan`, `range --investmentId`, `positions`,
-`rebalance-check`) rely on an active Agentic Wallet session. If one returns
-`NOT_LOGGED_IN` / `SESSION_EXPIRED`, tell the user to run the
+**`recommend` is the default answer** to an open-ended "what should I do"
+question — it wraps `scan --with-range` (page 1 only, for speed) plus a
+one-line check on any held positions, and prints a single verdict instead of
+requiring you to pick which of the other commands to run. Reach for `scan`,
+`range`, `positions`, or `rebalance-check` directly when the user's question
+is already specific (a particular pool, a particular position, more pages of
+coverage than `recommend`'s fast default).
+
+**`--capital <usd>`** (on `recommend`/`scan`/`range`) turns the abstract
+ranking into a concrete position-sizing check: expected $/yr at the current
+rate, and — the important part — what share of the pool's TVL that deposit
+would be. Above 20% share, a warning fires: at that size you're not really
+diversified into the pool, you're moving its price and concentrating IL risk
+on yourself. Always surface this warning if the user gives a deposit amount
+and it fires; don't let a strong Richness Score grade overshadow it.
+
+**`--target-offset`** (on `range --side sell/buy`) answers "I want to sell/buy
+at roughly this price" directly, instead of making the user interpret which
+of the preset ±5/10/20/30/50% rows is closest to what they meant.
+
+**Threshold flags on `scan`** (`--max-fee-rate`, `--min-tvl`,
+`--peer-outlier-multiple`, `--min-security-score`) let a user loosen or
+tighten the pre-deposit screen's strictness. Defaults are reasonable; only
+change them if the user explicitly asks for a stricter or looser screen —
+don't silently loosen a threshold just because nothing passed the default one.
+
+All commands that touch `baw` (`recommend`, `scan`, `range --investmentId`,
+`positions`, `rebalance-check`) rely on an active Agentic Wallet session. If
+one returns `NOT_LOGGED_IN` / `SESSION_EXPIRED`, tell the user to run the
 `binance-agentic-wallet` skill's sign-in flow (`auth signin` → `auth verify`)
 first, then retry — do not attempt to sign in without the user's explicit
 go-ahead, per that skill's rules.
+
+## Scheduled monitoring
+
+`rebalance-check --json` emits `{"positions": [...], "any_needs_attention":
+bool}` — `needs_attention` fires per position when it's itself flagged by the
+pre-deposit screen, or when the market has a meaningfully richer alternative
+(>1.5x better vol_ratio) for the same ticker. This is built for the
+`schedule` skill: wire a recurring task that runs `rebalance-check --json`
+and only messages the user when `any_needs_attention` is true, rather than a
+daily report regardless of whether anything changed. Still report-only —
+nothing here ever calls `defi redeem`/`deposit` on its own; a scheduled run
+surfaces a suggestion, the user (or a follow-up confirmed request) still
+drives any actual move.
 
 ## Executing a recommendation
 

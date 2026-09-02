@@ -179,25 +179,35 @@ action inside a Claude session for the rendered version)*
 ## Usage
 
 ```bash
+# --- single entry point: one verdict (needs a signed-in `baw` session) ---
+python riskscreen.py recommend [--capital 10000]
+
 # --- market data (public API, no auth) ---
 python riskscreen.py stocks --limit 20 --type 1
 python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- recommendation (needs a signed-in `baw` session) ---
-python riskscreen.py scan --top 15 [--with-range] [--json]
+python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000]
+  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+  [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # or without a live pool
 
 # --- portfolio + rebalance (needs a signed-in `baw` session) ---
 python riskscreen.py positions [--refresh] [--json]
-python riskscreen.py rebalance-check
+python riskscreen.py rebalance-check [--json]   # --json for scheduled monitoring, see Roadmap
 ```
 
-`scan`, `range --investmentId`, `positions`, and `rebalance-check` shell out
-to `baw` (`defi investment-list` / `investment-info` / `defi position`), so
-they require an active Agentic Wallet session (`baw auth signin` / `baw auth
-verify`). `stocks`, `vol`, and `range --ticker/--apy` hit public Binance Web3
-endpoints directly and need no auth.
+`recommend`, `scan`, `range --investmentId`, `positions`, and
+`rebalance-check` shell out to `baw` (`defi investment-list` /
+`investment-info` / `defi position` / `defi protocol-info`), so they require
+an active Agentic Wallet session (`baw auth signin` / `baw auth verify`).
+`stocks`, `vol`, and `range --ticker/--apy` hit public Binance Web3 endpoints
+directly and need no auth.
+
+**Testing**: `pytest test_riskscreen.py` runs 53 unit tests over the pure-math
+functions (no network/baw needed). Live-data smoke tests for every command
+are documented in "Status" below.
 
 **Execution is intentionally out of scope for this script.** `rebalance-check`
 prints a report and moves nothing. To act on any recommendation, run
@@ -271,6 +281,8 @@ the contract itself is broken. Closing that gap is the near-term priority;
 everything below is ordered roughly by how directly it extends what's
 already built.
 
+### Still open
+
 - **Uniswap V4 hook safety audit.** V4 pools can carry arbitrary custom hook
   contracts — logic outside the audited core AMM, and a real vector for
   malicious or just poorly-written pools (fee-skimming hooks, hooks that
@@ -321,9 +333,33 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
-- **Scheduled rebalance monitoring.** `rebalance-check` is pull-only today.
-  Wiring it to a scheduled task (daily, say) that surfaces a notification
-  when a held position's `vol_ratio` or `p_active` drifts past a threshold
-  — still report-only, still routed through the confirmed `baw` execution
-  flow — turns "check when I remember to ask" into "get told when it
-  matters."
+### Recently shipped (from a PM/QA pass)
+
+A full product review plus a full test pass produced these, in addition to
+the crash/correctness bugfixes covered in "Status" above:
+
+- **`recommend`** — the single-entry-point gap is closed. One command, one
+  verdict: top pick, its range, a check on any held positions, no need to
+  know which of `scan`/`range`/`positions` to run first.
+- **`--capital <usd>`** on `recommend`/`scan`/`range` — concrete position
+  sizing: expected $/yr, and a concentration warning if the deposit would
+  exceed 20% of the pool's TVL (`position_sizing_note`).
+- **`--target-offset`** on `range --side sell/buy` — an exact target price
+  offset instead of only the preset ±5/10/20/30/50% sweep.
+- **Configurable pre-deposit thresholds** (`--max-fee-rate`, `--min-tvl`,
+  `--peer-outlier-multiple`, `--min-security-score` on `scan`) — the screen's
+  strictness is no longer hardcoded.
+- **Pagination** (`--max-pages` on `scan`, default 3) — pool discovery is no
+  longer capped at the first 100 pools by apy; a lower-apy-but-cheaper-vol
+  pool 150th in line is now reachable.
+- **Pool-matching robustness** — the pre-filter now splits on `-/_` and
+  whitespace (not just `-`) and also matches bare tickers, and a pool whose
+  on-chain `assetTokenList` doesn't confirm a bStock is now skipped rather
+  than trusted on the name-match guess alone (a real, if rare, mis-attribution
+  bug fixed alongside the widening).
+- **`rebalance-check --json`** with a `needs_attention` flag per position —
+  built for the `schedule` skill: wire a recurring check that only messages
+  the user when something actually changed, instead of a report regardless.
+- **`test_riskscreen.py`** — 53 unit tests over every pure-math function
+  (`breakeven_volatility`, `vol_richness_ratio`, `no_exit_probability`,
+  `pool_risk_flags`, ...). Run with `pytest test_riskscreen.py`.

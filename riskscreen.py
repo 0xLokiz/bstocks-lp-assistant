@@ -33,11 +33,12 @@ Data source (needs an active `baw` session):
   - LP pool APY/TVL/composition: `baw defi investment-list` / `investment-info`
 
 Usage:
+  python riskscreen.py recommend                          # single entry point: one verdict
   python riskscreen.py stocks --limit 20
   python riskscreen.py vol --ticker TSLA --days 30
-  python riskscreen.py scan --top 15
+  python riskscreen.py scan --top 15 --capital 10000
   python riskscreen.py range --ticker TSLA --apy 0.30 --side straddle
-  python riskscreen.py range --ticker TSLA --apy 0.30 --side sell
+  python riskscreen.py range --ticker TSLA --apy 0.30 --side sell --target-offset 0.15
   python riskscreen.py positions
   python riskscreen.py rebalance-check
 
@@ -52,6 +53,7 @@ import argparse
 import json
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -277,12 +279,20 @@ SIDED_BAND_WIDTH = 0.10
 SAFETY_P_ACTIVE_FLOOR = 0.6
 
 
-def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0):
+def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
+                     target_offset=None, band_width=SIDED_BAND_WIDTH):
     """Sweep a set of candidate ranges and recommend the one with the highest net_apy among
     those meeting the SAFETY_P_ACTIVE_FLOOR probability floor. `side`: "straddle" (default,
     symmetric market-making ranges around the current price), "sell" (single-sided ranges
     above current price -- a limit-sell-style order), or "buy" (single-sided ranges below --
-    a limit-buy-style order)."""
+    a limit-buy-style order).
+
+    `target_offset` (sell/buy only): if given, an exact offset from the current price (e.g.
+    0.15 = 15% above/below) to evaluate *in addition to* the preset sweep -- for "I want to
+    sell/buy at this specific price," not just "show me the standard offsets." `band_width`
+    sets that target range's width (default SIDED_BAND_WIDTH); the row is marked
+    `"is_target": True` so callers can highlight it distinctly from the sweep.
+    """
     rows = []
     if side == "straddle":
         for w in DEFAULT_STRADDLE_WIDTHS:
@@ -295,12 +305,22 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0):
         })
     elif side == "sell":
         for offset in DEFAULT_SIDED_OFFSETS:
-            rows.append(range_metrics(pool_apy, sigma_annual, 1 + offset, 1 + offset + SIDED_BAND_WIDTH, years))
+            rows.append(range_metrics(pool_apy, sigma_annual, 1 + offset, 1 + offset + band_width, years))
+        if target_offset is not None:
+            row = range_metrics(pool_apy, sigma_annual, 1 + target_offset, 1 + target_offset + band_width, years)
+            row["is_target"] = True
+            rows.append(row)
     elif side == "buy":
         for offset in DEFAULT_SIDED_OFFSETS:
             pb = 1 - offset
-            pa = max(pb - SIDED_BAND_WIDTH, 0.01)
+            pa = max(pb - band_width, 0.01)
             rows.append(range_metrics(pool_apy, sigma_annual, pa, pb, years))
+        if target_offset is not None:
+            pb = 1 - target_offset
+            pa = max(pb - band_width, 0.01)
+            row = range_metrics(pool_apy, sigma_annual, pa, pb, years)
+            row["is_target"] = True
+            rows.append(row)
     else:
         raise ValueError(f"unknown side {side!r}")
     safe = [r for r in rows if r["p_active"] >= SAFETY_P_ACTIVE_FLOOR]
@@ -332,11 +352,43 @@ def baw(*args):
     return json.loads(stdout[first_brace:] if first_brace > 0 else stdout)
 
 
-def fetch_lp_investments():
-    body = baw("defi", "investment-list", "--investType", "LiquidityPool", "--size", "100")
-    if not body.get("success"):
-        raise RuntimeError(json.dumps(body.get("error", body)))
-    return body["data"]["list"]
+def fetch_lp_investments(max_pages=3):
+    """Page through `defi investment-list` (max 100/page per the API) instead of reading only
+    the first page. Sorted by apy DESC (the API default), so later pages surface lower-apy --
+    but not necessarily lower risk-adjusted -- pools that a single 100-pool page would never
+    reach. Stops early once a page comes back short (no more results) or `max_pages` is hit.
+    """
+    all_pools = []
+    for page in range(1, max_pages + 1):
+        body = baw("defi", "investment-list", "--investType", "LiquidityPool", "--size", "100", "--page", str(page))
+        if not body.get("success"):
+            raise RuntimeError(json.dumps(body.get("error", body)))
+        page_list = body["data"]["list"]
+        all_pools.extend(page_list)
+        if len(page_list) < 100:
+            break
+    return all_pools
+
+
+POOL_SHARE_WARNING_THRESHOLD = 0.20  # warn if an intended deposit would exceed this share of pool TVL
+
+
+def position_sizing_note(capital, tvl, net_apy):
+    """Concrete position-sizing advice for an intended deposit of `capital` USD into a pool
+    with current `tvl` and expected `net_apy`. Returns None if no capital was given; otherwise
+    a dict with your resulting share of the pool, the expected dollar return at the current
+    rate, and a concentration warning when your share would be large enough that you'd
+    dominate the pool -- your own entry/exit moves the price, and IL risk that would normally
+    spread across many LPs concentrates on you instead."""
+    if capital is None or capital <= 0:
+        return None
+    share = capital / (tvl + capital) if (tvl + capital) > 0 else 1.0
+    warning = None
+    if share > POOL_SHARE_WARNING_THRESHOLD:
+        warning = (f"depositing ${capital:,.0f} would make you ~{share*100:.0f}% of this pool's "
+                   f"${tvl:,.0f} TVL -- you'd dominate it: your own entry/exit moves the price, "
+                   f"and IL risk concentrates on you instead of spreading across many LPs")
+    return {"capital": capital, "share_pct": share, "dollar_return": capital * net_apy, "warning": warning}
 
 
 MAX_SANE_FEE_RATE = 0.05      # 5% per swap -- generous; real fee tiers top out around 1%
@@ -345,7 +397,10 @@ PEER_APY_OUTLIER_MULTIPLE = 5  # flag if > 5x the median apy of other pools on t
 MIN_PROTOCOL_SECURITY_SCORE = 50  # `defi protocol-info` securityScore floor (0-100)
 
 
-def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
+def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
+                     max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
+                     peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
+                     min_security_score=MIN_PROTOCOL_SECURITY_SCORE):
     """Aggregate pre-deposit sanity/safety screen for one LP pool -- generalizes the original
     single feeRate check into independent signals for the two questions that actually matter
     before recommending a deposit: is the advertised yield even real (data-plausibility), and
@@ -387,22 +442,22 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
     if fee_rate is not None:
         try:
             fee_rate = float(fee_rate)
-            if fee_rate > MAX_SANE_FEE_RATE:
-                flags.append(f"feeRate={fee_rate*100:.2f}%/swap exceeds a sane range (>{MAX_SANE_FEE_RATE*100:.0f}%) "
+            if fee_rate > max_fee_rate:
+                flags.append(f"feeRate={fee_rate*100:.2f}%/swap exceeds a sane range (>{max_fee_rate*100:.0f}%) "
                               f"-- likely a dynamic/keeper-priced fee snapshot, not a static rate; "
                               f"annualizing it into apy is not meaningful either way")
         except (TypeError, ValueError):
             pass
 
     tvl = float(pool.get("tvl") or info.get("tvl") or 0)
-    if tvl < MIN_SANE_TVL_USD:
-        flags.append(f"TVL ${tvl:,.0f} is below ${MIN_SANE_TVL_USD:,.0f} -- apy from this little "
+    if tvl < min_tvl_usd:
+        flags.append(f"TVL ${tvl:,.0f} is below ${min_tvl_usd:,.0f} -- apy from this little "
                       f"liquidity is statistically noisy, easily swung by a single trade")
 
     apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
     if peer_apys:
         median = statistics.median(peer_apys)
-        if median > 0 and apy > median * PEER_APY_OUTLIER_MULTIPLE:
+        if median > 0 and apy > median * peer_outlier_multiple:
             flags.append(f"apy is {apy/median:.1f}x the median ({median*100:.1f}%) of other pools "
                           f"on the same token -- outlier, treat as unverified until explained")
 
@@ -412,8 +467,8 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
     if protocol_security_score is not None:
         try:
             score = float(protocol_security_score)
-            if score < MIN_PROTOCOL_SECURITY_SCORE:
-                flags.append(f"protocol security score {score:.0f}/100 is below {MIN_PROTOCOL_SECURITY_SCORE} "
+            if score < min_security_score:
+                flags.append(f"protocol security score {score:.0f}/100 is below {min_security_score} "
                               f"-- elevated smart-contract risk at the protocol level")
         except (TypeError, ValueError):
             pass
@@ -511,35 +566,41 @@ def cmd_vol(args):
               f"est. full-range IL/yr = {il*100:.2f}%{be_str}")
 
 
-def cmd_scan(args):
-    print("fetching tokenized-stock list...", file=sys.stderr)
+def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_USD,
+             peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE, min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
+             with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
+    """Core of `scan`, factored out so `recommend` can reuse it without going through argparse.
+    Returns (results, flagged) sorted by net_apy descending; raises on an unrecoverable baw
+    error (e.g. not signed in) -- callers decide how to present that."""
+    log("fetching tokenized-stock list...")
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
     ticker_by_symbol = {t["symbol"].lower(): t for t in stock_tokens}
 
-    print("fetching LP pools (requires signed-in baw session)...", file=sys.stderr)
-    try:
-        pools = fetch_lp_investments()
-    except Exception as e:
-        print(f"could not fetch LP pools: {e}", file=sys.stderr)
-        print("run `baw auth signin` / `baw auth verify` first, then re-run scan.", file=sys.stderr)
-        sys.exit(1)
+    log("fetching LP pools (requires signed-in baw session)...")
+    pools = fetch_lp_investments(max_pages=max_pages)
 
+    ticker_by_ticker = {t["ticker"].lower(): t for t in stock_tokens}
     candidates = []
     for p in pools:
         name = p.get("investmentName", "")
-        name_tokens = [tok.lower() for tok in name.replace("-", "/").split("/")]
-        hit = next((ticker_by_symbol[tok] for tok in name_tokens if tok in ticker_by_symbol), None)
-        if hit:
-            candidates.append((p, hit))
+        # widen the pre-filter net (false negatives here mean a real bStock pool is never
+        # even checked): split on any of -/_ and whitespace, not just "-", and also match a
+        # bare ticker (e.g. "GME") in case a pool is ever named without the "B" suffix. This
+        # is only a cheap shortlist -- the authoritative check is the assetTokenList address
+        # match below, so a wider net's false positives get corrected there, not compounded.
+        name_tokens = [tok.lower() for tok in re.split(r"[-/_\s]+", name) if tok]
+        is_candidate = any(tok in ticker_by_symbol or tok in ticker_by_ticker for tok in name_tokens)
+        if is_candidate:
+            candidates.append(p)
 
-    print(f"found {len(candidates)}/{len(pools)} LP pools naming a tokenized-stock symbol", file=sys.stderr)
+    log(f"found {len(candidates)}/{len(pools)} LP pools naming a tokenized-stock symbol")
 
     # Pass 1: resolve each candidate's stock/vol/apy, without deciding risk flags yet --
     # the peer-outlier check needs every ticker's full apy list first.
     prepared = []
     vol_cache = {}
-    for pool, name_hit in candidates:
+    for pool in candidates:
         try:
             info = fetch_investment_info(pool["investmentId"])
         except Exception:
@@ -551,8 +612,14 @@ def cmd_scan(args):
         stock = next(
             (stock_index[(chain_id, a["tokenAddress"].lower())]
              for a in asset_list if (chain_id, a["tokenAddress"].lower()) in stock_index),
-            name_hit,
+            None,
         )
+        if stock is None:
+            # name-matching was only ever a pre-filter guess (see the widened matcher above);
+            # if the authoritative on-chain assetTokenList doesn't confirm a bStock in this
+            # pool, trusting the name guess anyway risks attributing volatility/apy data to
+            # the wrong token entirely. Skip rather than silently mis-score the pool.
+            continue
 
         key = (stock["chainId"], stock["contractAddress"])
         if key not in vol_cache:
@@ -592,7 +659,10 @@ def cmd_scan(args):
         protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
         security_score = fetch_protocol_security_score(protocol_id, security_score_cache) if protocol_id else None
         peer_apys = [a for inv_id, a in entries_by_ticker.get(stock["ticker"], []) if inv_id != pool["investmentId"]]
-        flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=security_score)
+        flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=security_score,
+                                 max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
+                                 peer_outlier_multiple=peer_outlier_multiple,
+                                 min_security_score=min_security_score)
         if flags:
             flagged.append((pool.get("investmentName"), pool.get("protocolName"), flags))
             continue
@@ -607,13 +677,27 @@ def cmd_scan(args):
             "grade": richness_grade(scored["vol_ratio"]),
             **scored,
         }
-        if args.with_range:
+        if with_range:
             _, best = recommend_range(apy, sigma, side="straddle")
             best["confidence"] = confidence_grade(best["p_active"])
             result["best_range"] = best
         results.append(result)
 
     results.sort(key=lambda r: r["net_apy"], reverse=True)
+    return results, flagged
+
+
+def cmd_scan(args):
+    try:
+        results, flagged = run_scan(
+            max_pages=args.max_pages, max_fee_rate=args.max_fee_rate, min_tvl=args.min_tvl,
+            peer_outlier_multiple=args.peer_outlier_multiple, min_security_score=args.min_security_score,
+            with_range=args.with_range,
+        )
+    except Exception as e:
+        print(f"could not fetch LP pools: {e}", file=sys.stderr)
+        print("run `baw auth signin` / `baw auth verify` first, then re-run scan.", file=sys.stderr)
+        sys.exit(1)
 
     if args.with_range:
         print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'grade':>7}"
@@ -637,6 +721,15 @@ def cmd_scan(args):
                   f"{r['tvl']:>14,.0f}")
         print("\n(grade = Richness Score tier -- realized vol vs. this pool's breakeven vol, "
               "bucketed Rich/Fair/Cheap. Full numbers: --json.)")
+
+    if args.capital and results:
+        top = results[0]
+        note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
+        print(f"\nAt ${args.capital:,.0f} into the top pick ({top['pool']}): "
+              f"~${note['dollar_return']:,.0f}/yr at the current rate, "
+              f"~{note['share_pct']*100:.1f}% of its TVL.")
+        if note["warning"]:
+            print(f"WARNING: {note['warning']}")
 
     if flagged:
         print(f"\n{len(flagged)} pool(s) excluded from ranking -- pre-deposit screen flagged:")
@@ -678,6 +771,7 @@ def cmd_range(args):
         klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
         sigma = annualized_volatility(klines)
         label = f"{info['investmentName']} ({stock['ticker']})"
+        pool_tvl = float(info.get("tvl") or 0)
     else:
         if args.apy is None or args.ticker is None:
             print("provide --investmentId, or both --ticker and --apy", file=sys.stderr)
@@ -692,6 +786,7 @@ def cmd_range(args):
         sigma = annualized_volatility(klines)
         apy = args.apy
         label = f"{stock['symbol']} @ {apy*100:.2f}% pool APY"
+        pool_tvl = None  # no live pool -- no TVL to size a position against
 
     if sigma is None:
         print("not enough kline history to estimate volatility", file=sys.stderr)
@@ -702,7 +797,8 @@ def cmd_range(args):
     vr_str = f"{vol_ratio:.2f}" if vol_ratio is not None and math.isfinite(vol_ratio) else "n/a (0% APY)"
     print(f"{label} -- vol {sigma*100:.1f}%  |  Richness Score: {grade} (vol_ratio {vr_str})\n")
 
-    rows, best = recommend_range(apy, sigma, side=args.side)
+    rows, best = recommend_range(apy, sigma, side=args.side,
+                                  target_offset=args.target_offset, band_width=args.band_width)
     if best["net_apy"] <= 0:
         print("WARNING: every candidate range nets <=0% after estimated IL -- this pool's fee "
               "income does not currently cover the token's volatility risk. 'recommended' below "
@@ -721,12 +817,84 @@ def cmd_range(args):
         for r in rows:
             offset_pct = abs((r["pa"] if args.side == "sell" else r["pb"]) - 1) * 100
             band = f"[{r['pa']:.2f}, {r['pb']:.2f}]x"
+            tag = " (your target)" if r.get("is_target") else ""
             marker = "  <- recommended" if r is best else ""
             print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
-                  f"{r['net_apy']*100:>9.2f}%{marker}")
+                  f"{r['net_apy']*100:>9.2f}%{marker}{tag}")
         verb = "rises into" if args.side == "sell" else "falls into"
         print(f"\n(yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order -- earns fees "
               f"only once price {verb} the band; confidence = probability that ever happens within a year.)")
+        if args.target_offset is None:
+            print(f"(want an exact target instead of these presets? add "
+                  f"--target-offset 0.15 for +/-15% from current price, plus optional --band-width.)")
+
+    if args.capital:
+        if pool_tvl is None:
+            print(f"\n(--capital given, but this is a --ticker/--apy estimate with no live pool "
+                  f"TVL to size a position against -- use --investmentId for position sizing.)")
+        else:
+            note = position_sizing_note(args.capital, pool_tvl, best["net_apy"])
+            print(f"\nAt ${args.capital:,.0f} in the recommended range: "
+                  f"~${note['dollar_return']:,.0f}/yr at the current rate, "
+                  f"~{note['share_pct']*100:.1f}% of this pool's TVL.")
+            if note["warning"]:
+                print(f"WARNING: {note['warning']}")
+
+
+def cmd_recommend(args):
+    """Single entry point: one verdict instead of deciding which of scan/range/positions to
+    run. Ties together the market screen, the top pick's range recommendation, and (if any
+    are held) a one-line check on existing bStock LP positions against that market."""
+    try:
+        results, flagged = run_scan(max_pages=args.max_pages, with_range=True, log=lambda msg: None)
+    except Exception as e:
+        print(f"could not fetch LP pools: {e}", file=sys.stderr)
+        print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
+        sys.exit(1)
+
+    if not results:
+        print("no bStock LP pools passed the pre-deposit screen right now.")
+        if flagged:
+            print(f"({len(flagged)} pool(s) were excluded -- run `scan --with-range` for details.)")
+        return
+
+    top = results[0]
+    b = top["best_range"]
+    width = f"+/-{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full range"
+    print(f"Top pick: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
+          f"{width} range at {b['confidence']} confidence, {b['net_apy']*100:.1f}% net APY.\n")
+
+    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}")
+    for r in results[:3]:
+        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}")
+
+    if args.capital:
+        note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
+        print(f"\nAt ${args.capital:,.0f}: ~${note['dollar_return']:,.0f}/yr, "
+              f"~{note['share_pct']*100:.1f}% of {top['pool']}'s TVL.")
+        if note["warning"]:
+            print(f"WARNING: {note['warning']}")
+
+    try:
+        data = fetch_positions()
+        stock_tokens = fetch_stock_tokens()
+        stock_index = build_stock_index(stock_tokens)
+        held = lp_positions_on_stock_tokens(data, stock_index)
+    except Exception:
+        held = []
+
+    if held:
+        held_tickers = {h["stock"]["ticker"] for h in held}
+        print(f"\nYou currently hold {len(held)} bStock LP position(s) ({', '.join(sorted(held_tickers))}). "
+              f"Run `rebalance-check` to compare them against this market.")
+    else:
+        print(f"\nNo current bStock LP positions. See `range --investmentId {top['investmentId']}` "
+              f"for the full range breakdown on the top pick, or `range --side sell/buy` to use it "
+              f"as a limit order instead.")
+
+    if flagged:
+        print(f"\n({len(flagged)} pool(s) excluded by the pre-deposit screen -- "
+              f"run `scan --with-range` for what and why.)")
 
 
 def cmd_positions(args):
@@ -752,6 +920,9 @@ def cmd_positions(args):
         print(json.dumps(hits, indent=2, default=str))
 
 
+REBALANCE_ATTENTION_GAP = 1.5  # flag "needs attention" if held vol_ratio is >1.5x the best market alternative
+
+
 def cmd_rebalance_check(args):
     print("reading current positions...", file=sys.stderr)
     try:
@@ -765,6 +936,8 @@ def cmd_rebalance_check(args):
     held = lp_positions_on_stock_tokens(data, stock_index)
     if not held:
         print("no LP positions on tokenized-stock pairs to check.")
+        if args.json:
+            print(json.dumps({"positions": [], "any_needs_attention": False}, indent=2))
         return
 
     print("scanning current market for comparison...", file=sys.stderr)
@@ -776,9 +949,11 @@ def cmd_rebalance_check(args):
     market_by_id = {m["investmentId"]: m for m in market}
 
     print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
+    rows = []
     for h in held:
         inv_ids = h["investmentIds"] or []
         held_ratio = None
+        held_flags = []
         for inv_id in inv_ids:
             m = market_by_id.get(inv_id)
             if not m:
@@ -817,11 +992,28 @@ def cmd_rebalance_check(args):
             time.sleep(0.1)
         best_market_ratio = min(candidates) if candidates else None
 
+        # "needs attention": the held pool itself is flagged, or the market has a meaningfully
+        # richer alternative (>1.5x better vol_ratio) for the same ticker -- a bar deliberately
+        # above "any tiny difference," so a scheduled check (see README) doesn't cry wolf daily.
+        needs_attention = bool(held_flags) or (
+            held_ratio is not None and best_market_ratio is not None and best_market_ratio > 0
+            and held_ratio > best_market_ratio * REBALANCE_ATTENTION_GAP
+        )
         label = f"{h['protocolName']} ({h['stock']['ticker']})"
-        print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}")
+        print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}"
+              f"{'  <- needs attention' if needs_attention else ''}")
+        rows.append({
+            "protocol": h["protocolName"], "ticker": h["stock"]["ticker"],
+            "held_vol_ratio": held_ratio, "held_grade": richness_grade(held_ratio),
+            "best_market_vol_ratio": best_market_ratio, "best_market_grade": richness_grade(best_market_ratio),
+            "held_flags": held_flags, "needs_attention": needs_attention,
+        })
 
     print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
           "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
+
+    if args.json:
+        print(json.dumps({"positions": rows, "any_needs_attention": any(r["needs_attention"] for r in rows)}, indent=2))
 
 
 def main():
@@ -843,6 +1035,20 @@ def main():
     p_scan = sub.add_parser("scan", help="rank stock-token LP pools by risk-adjusted (net of IL) APY")
     p_scan.add_argument("--top", type=int, default=15)
     p_scan.add_argument("--json", action="store_true")
+    p_scan.add_argument("--capital", type=float, default=None,
+                         help="optional: intended deposit size in USD -- shows expected $ return and "
+                              "a concentration warning if you'd dominate the top pick's TVL")
+    p_scan.add_argument("--max-pages", type=int, default=3,
+                         help="pages of LP pools to fetch (100/page, sorted by apy DESC); higher "
+                              "reaches lower-apy pools a single page would miss, at the cost of more API calls")
+    p_scan.add_argument("--max-fee-rate", type=float, default=MAX_SANE_FEE_RATE,
+                         help=f"pre-deposit screen: max sane feeRate per swap (default {MAX_SANE_FEE_RATE})")
+    p_scan.add_argument("--min-tvl", type=float, default=MIN_SANE_TVL_USD,
+                         help=f"pre-deposit screen: minimum pool TVL in USD (default {MIN_SANE_TVL_USD:.0f})")
+    p_scan.add_argument("--peer-outlier-multiple", type=float, default=PEER_APY_OUTLIER_MULTIPLE,
+                         help=f"pre-deposit screen: flag apy above this multiple of peer median (default {PEER_APY_OUTLIER_MULTIPLE})")
+    p_scan.add_argument("--min-security-score", type=float, default=MIN_PROTOCOL_SECURITY_SCORE,
+                         help=f"pre-deposit screen: minimum protocol securityScore, 0-100 (default {MIN_PROTOCOL_SECURITY_SCORE})")
     p_scan.add_argument("--with-range", action="store_true",
                          help="also compute the recommended concentrated-liquidity range per pool")
     p_scan.set_defaults(func=cmd_scan)
@@ -853,6 +1059,14 @@ def main():
     p_range.add_argument("--apy", type=float, help="alternative to --investmentId: pool APY as a decimal (0.30 = 30%%)")
     p_range.add_argument("--side", choices=["straddle", "sell", "buy"], default="straddle",
                           help="straddle=symmetric market-making (default), sell/buy=single-sided limit-order-style range")
+    p_range.add_argument("--target-offset", type=float, default=None,
+                          help="sell/buy only: exact offset from current price (0.15 = 15%%) to evaluate "
+                               "in addition to the preset sweep -- for a specific target price, not just presets")
+    p_range.add_argument("--band-width", type=float, default=SIDED_BAND_WIDTH,
+                          help=f"sell/buy only: width of the --target-offset band (default {SIDED_BAND_WIDTH})")
+    p_range.add_argument("--capital", type=float, default=None,
+                          help="optional (--investmentId only): intended deposit size in USD -- shows "
+                               "expected $ return and a concentration warning vs this pool's TVL")
     p_range.set_defaults(func=cmd_range)
 
     p_positions = sub.add_parser("positions", help="show current LP positions on tokenized-stock pairs")
@@ -862,7 +1076,19 @@ def main():
 
     p_rebalance = sub.add_parser("rebalance-check",
                                   help="compare held stock-token LP positions against current market (report only, no execution)")
+    p_rebalance.add_argument("--json", action="store_true",
+                              help="machine-readable output with a needs_attention flag per position -- "
+                                   "for wiring into a scheduled check, see README")
     p_rebalance.set_defaults(func=cmd_rebalance_check)
+
+    p_recommend = sub.add_parser("recommend",
+                                  help="single entry point: top pick + range + a check on any held positions, one verdict")
+    p_recommend.add_argument("--max-pages", type=int, default=1,
+                              help="pages of LP pools to scan (default 1, for a fast verdict; "
+                                   "use `scan --max-pages` directly for the thorough sweep)")
+    p_recommend.add_argument("--capital", type=float, default=None,
+                              help="optional: intended deposit size in USD -- shows expected $ return and a concentration warning")
+    p_recommend.set_defaults(func=cmd_recommend)
 
     args = parser.parse_args()
     args.func(args)
