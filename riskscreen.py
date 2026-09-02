@@ -1151,6 +1151,7 @@ def cmd_scan(args):
             "unscoreable": unscoreable,
             "capital_note": capital_note,
             "model_apy_caveat": MODEL_APY_CAVEAT,
+            "v4_override_reason": args.allow_v4,
         }, indent=2))
         return
 
@@ -1501,7 +1502,8 @@ def cmd_rebalance_check(args):
     stock_index = build_stock_index(stock_tokens)
     held = lp_positions_on_stock_tokens(data, stock_index)
     if not held:
-        payload = {"as_of": datetime.now(timezone.utc).isoformat(), "positions": [], "any_needs_attention": False}
+        payload = {"as_of": datetime.now(timezone.utc).isoformat(), "positions": [], "any_needs_attention": False,
+                   "v4_override_reason": args.allow_v4}
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
@@ -1601,6 +1603,7 @@ def cmd_rebalance_check(args):
             "elapsed_seconds": round(time.time() - started, 1),
             "positions": rows,
             "any_needs_attention": any(r["needs_attention"] for r in rows),
+            "v4_override_reason": args.allow_v4,
         }, indent=2))
     else:
         print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
@@ -1641,6 +1644,18 @@ def _offset_fraction(s):
     return v
 
 
+def _v4_override_reason(s):
+    """--allow-v4 takes a reason, not a bare flag -- overriding a hard block that exists
+    specifically because this tool cannot see hook risk should leave a record of *why* someone
+    decided to do it anyway, not just that they did. Recorded verbatim in --json output
+    (v4_override_reason) wherever the command produces JSON."""
+    s = s.strip()
+    if not s:
+        raise argparse.ArgumentTypeError(
+            "requires a non-empty reason, e.g. --allow-v4 \"already audited by X\"")
+    return s
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1674,9 +1689,10 @@ def main():
                          help=f"pre-deposit screen: flag apy above this multiple of peer median (default {PEER_APY_OUTLIER_MULTIPLE})")
     p_scan.add_argument("--min-security-score", type=_nonneg_float, default=MIN_PROTOCOL_SECURITY_SCORE,
                          help=f"pre-deposit screen: minimum protocol securityScore, 0-100 (default {MIN_PROTOCOL_SECURITY_SCORE})")
-    p_scan.add_argument("--allow-v4", action="store_true",
-                         help="don't hard-block Uniswap V4 pools over unknown hook safety (see README) -- "
-                              "off by default, turn on only for an already-vetted pool or explicit override")
+    p_scan.add_argument("--allow-v4", type=_v4_override_reason, default=None, metavar="REASON",
+                         help="override the V4-generation hard block (see README) for an already-vetted pool "
+                              "or explicit ask -- requires a reason, recorded in --json output "
+                              "(e.g. --allow-v4 \"audited by X\")")
     p_scan.add_argument("--with-range", action="store_true",
                          help="also compute the recommended concentrated-liquidity range per pool")
     p_scan.set_defaults(func=cmd_scan)
@@ -1695,10 +1711,10 @@ def main():
     p_range.add_argument("--capital", type=_nonneg_float, default=None,
                           help="optional (--investmentId only): intended deposit size in USD -- shows "
                                "expected $ return and a concentration warning vs this pool's TVL")
-    p_range.add_argument("--allow-v4", action="store_true",
-                          help="don't warn-and-still-show Uniswap V4 pools over unknown hook safety differently -- "
-                               "the warning still prints either way for an explicit --investmentId; this only "
-                               "affects whether the flag is raised at all")
+    p_range.add_argument("--allow-v4", type=_v4_override_reason, default=None, metavar="REASON",
+                          help="override the V4-generation hard block -- requires a reason "
+                               "(e.g. --allow-v4 \"audited by X\"); the warning still prints either way "
+                               "for an explicit --investmentId, this only affects whether the flag is raised")
     p_range.set_defaults(func=cmd_range)
 
     p_positions = sub.add_parser("positions", help="show current LP positions on tokenized-stock pairs")
@@ -1713,8 +1729,9 @@ def main():
                                    "for wiring into a scheduled check, see README")
     p_rebalance.add_argument("--max-pages", type=_positive_int, default=3,
                               help="pages of the market to scan for comparison (default 3)")
-    p_rebalance.add_argument("--allow-v4", action="store_true",
-                              help="don't hard-block Uniswap V4 pools over unknown hook safety when comparing")
+    p_rebalance.add_argument("--allow-v4", type=_v4_override_reason, default=None, metavar="REASON",
+                              help="override the V4-generation hard block when comparing -- requires a reason, "
+                                   "recorded in --json output (e.g. --allow-v4 \"audited by X\")")
     p_rebalance.set_defaults(func=cmd_rebalance_check)
 
     p_recommend = sub.add_parser("recommend",
@@ -1724,8 +1741,9 @@ def main():
                                    "use `scan --max-pages` directly for the thorough sweep)")
     p_recommend.add_argument("--capital", type=_nonneg_float, default=None,
                               help="optional: intended deposit size in USD -- shows expected $ return and a concentration warning")
-    p_recommend.add_argument("--allow-v4", action="store_true",
-                              help="don't hard-block Uniswap V4 pools over unknown hook safety")
+    p_recommend.add_argument("--allow-v4", type=_v4_override_reason, default=None, metavar="REASON",
+                              help="override the V4-generation hard block -- requires a reason "
+                                   "(e.g. --allow-v4 \"audited by X\")")
     p_recommend.set_defaults(func=cmd_recommend)
 
     args = parser.parse_args()

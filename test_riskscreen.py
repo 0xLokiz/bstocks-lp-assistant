@@ -42,6 +42,7 @@ from riskscreen import (
     _rogers_satchell_variance,
     _single_barrier_touch_probability,
     _union_bound_no_exit_probability,
+    _v4_override_reason,
 )
 
 
@@ -701,6 +702,19 @@ def test_offset_fraction_rejects_price_crushing_offset():
 def test_offset_fraction_accepts_normal_range():
     assert _offset_fraction("0.15") == 0.15
     assert _offset_fraction("-0.5") == -0.5
+
+
+# ---- _v4_override_reason (--allow-v4 requires a recorded reason, not a bare flag) ----
+
+def test_v4_override_reason_rejects_empty_string():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _v4_override_reason("")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _v4_override_reason("   ")
+
+
+def test_v4_override_reason_accepts_and_strips_a_real_reason():
+    assert _v4_override_reason("  already audited by X  ") == "already audited by X"
 
 
 # ---- Rogers-Satchell / Yang-Zhang volatility ----

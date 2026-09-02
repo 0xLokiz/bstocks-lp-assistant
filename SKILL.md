@@ -82,14 +82,19 @@ doesn't offer a clean opportunity right now.
 ## Uniswap V4 pools are hard-blocked by default
 
 `pool_risk_flags(..., block_unknown_v4_hooks=True)` (the default) excludes
-every Uniswap V4 pool from ranking, unconditionally — not just ones with an
-already-visible symptom like an extreme feeRate. Reason: V4 pools can carry
-an arbitrary custom hook, and this tool has no API access to a pool's hook
-address, permissions, or audit status; the protocol-level `securityScore`
-signal can't see it either (V3 and V4 score identically). `--allow-v4`
-disables this for an explicit user override or an already-vetted pool — only
-pass it through on a clear, explicit ask ("show me V4 pools anyway"), never
-by default just because nothing else qualified.
+every V4-generation pool from ranking, unconditionally — not just ones with
+an already-visible symptom like an extreme feeRate. Detection uses the
+structured `defiProtocolId` (e.g. "uniswap4", "pancakeswap4"), not the
+display name — PancakeSwap's own V4 is marketed as "PancakeSwap Infinity"
+with no "v4" in the name anywhere, so a name-match alone would miss it.
+Reason for the block itself: these pools can carry an arbitrary custom
+hook, and this tool has no API access to a pool's hook address,
+permissions, or audit status; the protocol-level `securityScore` signal
+can't see it either (V3 and V4 score identically). `--allow-v4 "REASON"`
+disables this for an explicit user override or an already-vetted pool — it
+takes a reason string, not a bare flag, recorded as `v4_override_reason` in
+`--json` output. Only pass it through on a clear, explicit ask ("show me V4
+pools anyway"), never by default just because nothing else qualified.
 
 ## Never let scan and rebalance-check disagree
 
@@ -246,12 +251,12 @@ python riskscreen.py stocks --limit 20 [--type 1|2|3]
 python riskscreen.py vol --ticker <TICKER> [--days 30] [--apy 0.30]
 
 # rank stock-token LP pools by vol_ratio / net APY (needs signed-in baw session)
-python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000] [--allow-v4]
+python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000] [--allow-v4 "REASON"]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000]
   [--peer-outlier-multiple 5] [--min-security-score 50]
 
 # range-by-range IL/APY breakdown + recommended range for one pool
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "REASON"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # without a live pool
 
@@ -260,7 +265,7 @@ python riskscreen.py positions [--refresh] [--json]
 
 # compare held positions' vol_ratio against the current market -- same evaluation
 # path as `scan` (report only — see "Executing a recommendation")
-python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4 "REASON"]
 ```
 
 **`--json` on `scan`/`positions`/`rebalance-check` is pure JSON on stdout —

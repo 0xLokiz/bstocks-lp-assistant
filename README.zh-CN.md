@@ -154,7 +154,7 @@ V3/V4 池子可能报出极不靠谱的 `apy` 数字，而且没有哪一个单�
 | apy 超过同ticker中位数的5倍 | 收益是真的吗？ | **通用情形**——不管是什么机制造成的，已知的还是未知的 |
 | `investable = false` | 安全吗？ | 已下架，无法新存款 |
 | 协议 `securityScore` < 50 | 安全吗？ | 明显不靠谱的协议（较弱的下限，见下文） |
-| 协议名包含"V4" | 安全吗？ | **默认硬性拦截**——见下方"Uniswap V4 池子默认硬拦截" |
+| 协议是V4系列（`defiProtocolId`） | 安全吗？ | **默认硬性拦截**——见下方"Uniswap V4 池子默认硬拦截" |
 
 **和 `flagged` 是两回事：`unscoreable`。** 有些池子根本没被评估过——
 `investment-info` 抓取失败、`assetTokenList` 确认不了是bStock、或者没有
@@ -170,8 +170,11 @@ V4 池子可以挂任意自定义hook合约——审计过的核心AMM之外的�
 看不到这个（V3和V4分数完全一样，见下方局限说明）。与其把这个留成一条注意
 事项，现在默认把**每一个**V4池子都排除出排名，无条件——不只是那些已经有
 明显症状（比如极端feeRate）的。要覆盖这个行为，明确要求或者是已经审查过
-的池子，可以传 `--allow-v4`；更深层的修复（真正的hook审计，等有这个数据
-之后）还在Roadmap里。
+的池子，可以传 `--allow-v4 "理由"`——它现在需要带一个理由，不是一个裸标
+志，这个理由会原样记录在 `--json` 输出的 `v4_override_reason` 字段里：
+既然要覆盖的这道拦截本来就是因为这个工具看不见hook风险才存在的，那覆盖
+它的时候就该留下一条"为什么"的记录，而不只是留下"有人这么做过"。更深层
+的修复（真正的hook审计，等有这个数据之后）还在Roadmap里。
 
 促成这个机制的案例：一个 Uniswap V4 的 QQQB-USDC 池子显示
 `apy=1,658.77%`，而同一交易对的等价 V3 池子只有 77.86%——追查发现是
@@ -239,15 +242,15 @@ python riskscreen.py stocks --limit 20 --type 1
 python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- 排名/建议（需要已登录的 `baw` 会话）---
-python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4]
+python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4 "理由"]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "理由"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # 不查真实池子也行
 
 # --- 持仓 + 再平衡（需要已登录的 `baw` 会话）---
 python riskscreen.py positions [--refresh] [--json]
-python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]   # --json 用于定时监控
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4 "理由"]   # --json 用于定时监控
 ```
 
 `recommend`、`scan`、`range --investmentId`、`positions`、`rebalance-check`
@@ -263,7 +266,7 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py`
-跑114个单元测试，覆盖所有纯数学/纯逻辑函数（不需要网络/baw）——CI
+跑116个单元测试，覆盖所有纯数学/纯逻辑函数（不需要网络/baw）——CI
 （`.github/workflows/test.yml`）在每次push时会跑这个加上 `py_compile`。每
 个命令的真实数据冒烟测试记录在下面的"运行状态"里。
 
@@ -415,8 +418,12 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
 - **稳定币地址列表挪到了 [`stablecoins.json`](stablecoins.json)**，可以
   用 `BSTOCKS_STABLECOIN_CONFIG` 覆盖——见上文"不是所有池子都是稳定币计
   价的"。
+- **`--allow-v4` 现在需要带一个理由，不是一个裸标志**——
+  `--allow-v4 "已由X审计过"`，原样记录在每个有 `--json` 输出的命令的
+  `v4_override_reason` 字段里。覆盖一道"因为工具看不见hook风险才存在"
+  的拦截，理应留下"为什么"的记录，而不只是"有人这么做过"。
 
-新增9个测试（总共114个，此前105个）。每一处修复都对照真实市场数据做过
+新增11个测试（总共116个，此前105个）。每一处修复都对照真实市场数据做过
 验证——V4那一项还专门确认了旧逻辑漏掉的那个真实池子。
 
 ### 最近完成的（发布前阻断项，来自第二轮外部审查）

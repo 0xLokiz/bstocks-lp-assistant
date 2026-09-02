@@ -180,7 +180,7 @@ is excluded from ranking, with the reason reported, not silently dropped.
 | apy > 5x peer median, same ticker | real yield? | **the general case** — any mechanism, known or not |
 | `investable = false` | safe? | delisted, no new deposits possible |
 | protocol `securityScore` < 50 | safe? | obviously disreputable protocols (weak floor, see below) |
-| protocol name contains "V4" | safe? | **hard-blocked by default** — see "V4 pools are hard-blocked" below |
+| protocol is V4-generation (`defiProtocolId`) | safe? | **hard-blocked by default** — see "V4 pools are hard-blocked" below |
 
 **Distinct from `flagged`: `unscoreable`.** Some pools are never evaluated
 at all — an `investment-info` fetch failed, `assetTokenList` didn't confirm
@@ -199,9 +199,13 @@ permissions, or audit status, and the protocol-level `securityScore` can't
 see it either (V3 and V4 score identically — see the limitation note
 below). Rather than leave this as a caveat, every V4 pool is excluded from
 ranking by default, unconditionally — not only ones with an already-visible
-symptom like an extreme `feeRate`. Pass `--allow-v4` to override for an
-explicit ask or an already-vetted pool; the deeper fix (an actual hook
-audit, once that data is available) is still tracked in Roadmap.
+symptom like an extreme `feeRate`. Pass `--allow-v4 "REASON"` to override
+for an explicit ask or an already-vetted pool — it takes a reason, not a
+bare flag, recorded verbatim as `v4_override_reason` in `--json` output, so
+overriding a block that exists specifically because this tool can't see
+hook risk leaves a record of *why* someone decided to do it anyway. The
+deeper fix (an actual hook audit, once that data is available) is still
+tracked in Roadmap.
 
 The case that motivated this: a Uniswap V4 QQQB-USDC pool showed
 `apy=1,658.77%` against 77.86% on the equivalent V3 pool for the same pair
@@ -282,15 +286,15 @@ python riskscreen.py stocks --limit 20 --type 1
 python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- recommendation (needs a signed-in `baw` session) ---
-python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4]
+python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4 "REASON"]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "REASON"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # or without a live pool
 
 # --- portfolio + rebalance (needs a signed-in `baw` session) ---
 python riskscreen.py positions [--refresh] [--json]
-python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]   # --json for scheduled monitoring
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4 "REASON"]   # --json for scheduled monitoring
 ```
 
 `recommend`, `scan`, `range --investmentId`, `positions`, and
@@ -309,7 +313,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 114 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 116 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -493,8 +497,14 @@ release blocker, but real gaps in what the tool actually checks:
 - **The stablecoin address list moved to [`stablecoins.json`](stablecoins.json)**,
   overridable via `BSTOCKS_STABLECOIN_CONFIG` — see "Not every pool is
   quoted against a stablecoin" above.
+- **`--allow-v4` now requires a reason, not a bare flag** —
+  `--allow-v4 "already audited by X"`, recorded verbatim as
+  `v4_override_reason` in `--json` output on every command that produces
+  it. Overriding a block that exists specifically because this tool can't
+  see hook risk should leave a record of *why*, not just that someone did
+  it.
 
-9 new tests (114 total, up from 105). Every fix verified against live
+11 new tests (116 total, up from 105). Every fix verified against live
 market data — including, for the V4 case, confirming the exact real-world
 pool that the old logic missed.
 
