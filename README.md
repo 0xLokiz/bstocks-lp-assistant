@@ -17,6 +17,10 @@ parts:
    position` and compares their risk-adjusted score against the live market,
    producing a report (never an auto-executed trade — see below).
 
+**New here?** See [INSTALL.md](INSTALL.md) for how to add this to your own
+Claude + Agent OS setup and use it conversationally, with no command-line
+syntax to remember.
+
 ## The idea
 
 LP fee/incentive APY is compensation for impermanent loss (IL), and IL scales
