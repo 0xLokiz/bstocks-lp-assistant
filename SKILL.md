@@ -242,7 +242,7 @@ Signals, current set:
 
 | Signal | Question | Catches |
 |---|---|---|
-| `feeRate` > 5%/swap | is the yield real? | a specific mechanism — invalid fee tier / dynamic-fee-hook artifact |
+| `feeRate` > 5%/swap | is the yield real? | a dynamic/keeper-priced fee read (see below) that a static-rate annualization can't handle |
 | TVL < $5,000 | is the yield real? | statistically noisy apy from too little liquidity |
 | apy > 5x peer median (same ticker) | is the yield real? | **the general case** — any mechanism producing an implausible apy, known or not |
 | `investable = false` | is it safe? | delisted product, no new deposits possible |
@@ -256,6 +256,18 @@ the peer median) even without knowing the specific cause in advance — a
 *any* mechanism that produces an outlier. When you notice a new failure
 mode this set doesn't cover, the fix is another independent signal in
 `pool_risk_flags()`, not a special case bolted onto the feeRate check.
+
+**On the feeRate check specifically — don't imply malice.** An extreme
+feeRate snapshot doesn't mean the pool is broken or malicious. Legitimate V4
+protocols (e.g. Fables' "intelligent fees") run hooks that reprice the swap
+fee per-transaction from realized volatility, calendar/session state, or
+order-flow direction — bounded and keeper-driven, the display is explicitly
+documented as "the latest contract read, not a quote." A single feeRate
+read from such a pool is a live, momentary number; treating it as a static
+annual rate (which is what `apy` computation does) is structurally wrong
+regardless of whether the hook itself is legitimate. Present this flag as
+"we can't annualize a dynamic fee, so this apy figure isn't meaningful" —
+not as an accusation.
 
 **Known limitation, state it plainly if asked**: `securityScore` is
 per-*protocol*, not per-pool or per-hook — Uniswap V3 and V4 both score

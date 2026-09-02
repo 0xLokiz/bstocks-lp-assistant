@@ -354,6 +354,13 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
     Data-plausibility signals (apy may not be real):
       - feeRate outside a sane per-swap range (catches the exact QQQB-USDC V4 case: a
         feeRate of 838.86%/swap produced apy=1658.77% vs 77.86% on the equivalent V3 pool).
+        NOTE ON CAUSE: an extreme snapshot doesn't necessarily mean the pool is broken or
+        malicious -- legitimate V4 protocols (e.g. Fables' "intelligent fees") run hooks that
+        reprice the swap fee per-transaction from realized volatility, session/calendar state,
+        or order flow direction, bounded and keeper-driven. A single feeRate read is then a
+        live, momentary number, not a stable rate -- annualizing it as if it were static (which
+        is what produces `apy`) is structurally wrong regardless of whether the hook itself is
+        legitimate. Flag it as "not a static rate we can annualize," not as "probably malicious."
       - TVL below a floor where a single trade can dominate the annualized apy estimate.
       - apy is a large outlier versus other pools on the *same* underlying ticker -- this is
         the general form of the feeRate check: it catches any mechanism (stale data, a
@@ -378,7 +385,8 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
             fee_rate = float(fee_rate)
             if fee_rate > MAX_SANE_FEE_RATE:
                 flags.append(f"feeRate={fee_rate*100:.2f}%/swap exceeds a sane range (>{MAX_SANE_FEE_RATE*100:.0f}%) "
-                              f"-- apy is likely a data or dynamic-fee-hook artifact")
+                              f"-- likely a dynamic/keeper-priced fee snapshot, not a static rate; "
+                              f"annualizing it into apy is not meaningful either way")
         except (TypeError, ValueError):
             pass
 

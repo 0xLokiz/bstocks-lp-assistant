@@ -115,7 +115,7 @@ is excluded from ranking, with the reason reported, not silently dropped.
 
 | Signal | Question | What it catches |
 |---|---|---|
-| `feeRate` > 5%/swap | real yield? | a specific mechanism (invalid fee tier / dynamic-fee-hook artifact) |
+| `feeRate` > 5%/swap | real yield? | a dynamic/keeper-priced fee read that a static-rate annualization can't handle |
 | TVL < $5,000 | real yield? | statistically noisy apy from too little liquidity |
 | apy > 5x peer median, same ticker | real yield? | **the general case** — any mechanism, known or not |
 | `investable = false` | safe? | delisted, no new deposits possible |
@@ -128,6 +128,17 @@ tier). A `feeRate` check alone only catches *that* mechanism; the
 peer-outlier check (this pool's apy was 21x its own ticker's peer median)
 independently flagged the same pool without needing to know the cause in
 advance — that's the generalization this section is about.
+
+**Not necessarily malicious.** [Fables](https://www.fables.fi) — a live
+hook-native ve(3,3) DEX on Uniswap v4, also trading tokenized stocks — runs
+"intelligent fees": hooks that reprice the swap fee per-transaction from
+realized volatility, calendar/session state, or order-flow direction,
+bounded and keeper-driven; their own docs describe a displayed fee as "the
+latest contract read, not a quote that can bind a later transaction." A
+`feeRate` snapshot from a pool like that is a live, momentary number — our
+static-rate annualization is structurally the wrong tool for it, whether or
+not the hook is legitimate. The flag means "we can't compute a meaningful
+apy for this," not an accusation.
 
 **Limitation worth stating plainly**: `securityScore` comes from
 `defi protocol-info` and is per-*protocol*, not per-pool or per-hook —
@@ -271,13 +282,26 @@ already built.
   outright" caution this project already applies to volatility risk,
   extended one layer deeper to contract risk. `query-token-audit` covers
   this checking pattern for tokens already; a pool-level analogue is the gap.
-- **Robinhood Chain compatibility.** Robinhood has been building a chain for
-  its own tokenized-stock offering. If/when RWA stock-token LPs exist there
-  with data comparably accessible to Binance's Web3 APIs, extending `stocks`
-  / `vol` / `scan` to include it turns this from a Binance-only screener into
-  a cross-venue one — genuinely more useful for "which venue's LP on this
-  same underlying is actually the better deal", not just which pool within
-  one venue.
+- **Robinhood Chain compatibility.** Confirmed concrete, not speculative:
+  [Fables](https://www.fables.fi) is live on Robinhood Chain today, trading
+  tokenized stocks (NVDA/USDG, TSLA/USDG, AAPL/USDG, SPY/USDG, ...) against
+  a public Blockscout explorer at `robinhoodchain.blockscout.com` — Blockscout
+  instances standardly expose a REST/GraphQL API, which is a plausible near-
+  term path to pulling comparable market/pool data the way `fetch_stock_tokens`
+  / `fetch_klines` do for Binance's bapi. If that data proves comparably
+  accessible, extending `stocks`/`vol`/`scan` to include it turns this from a
+  Binance-only screener into a cross-venue one — genuinely more useful for
+  "which venue's LP on this same underlying is actually the better deal,"
+  not just which pool within one venue.
+- **Session-aware volatility.** Fables' "Calendar" fee model reprices
+  differently for session/overnight/weekend/holiday state specifically
+  *because* tokenized-stock trading behavior differs across those windows
+  (the underlying only has real market-making during NYSE/NASDAQ hours).
+  `annualized_volatility()` currently treats all klines as one homogeneous
+  series; splitting realized vol into regular-hours vs. off-hours segments
+  (using `binance-tokenized-securities-info`'s market-status API to label
+  each candle) would likely sharpen `vol_ratio` and range recommendations
+  for exactly the reason Fables built a whole fee model around it.
 - **Exact double-barrier probability**, replacing the current conservative
   union-bound approximation for straddling ranges (`no_exit_probability`)
   with the proper reflection-principle series — tightens the `0%` readings
