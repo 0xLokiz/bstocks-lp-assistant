@@ -205,3 +205,54 @@ stock-token LPing as the market-making (or limit-order) activity it actually
 is, scores pools the way an options desk would price a straddle, recommends
 a concrete range instead of a vague "APY looks good", and stays in an
 advisory role — every fund movement is still a human-confirmed `baw` call.
+
+## Roadmap
+
+The volatility/IL model prices *market* risk. It currently has nothing to
+say about *pool* risk — a pool can be volatility-cheap and still be a bad
+place to put money if the contract itself is unsafe. Closing that gap is
+the near-term priority; everything below is ordered roughly by how directly
+it extends what's already built.
+
+- **Uniswap V4 hook safety screening.** V4 pools can carry arbitrary custom
+  hook contracts — logic outside the audited core AMM, and a real vector for
+  malicious or just poorly-written pools (fee-skimming hooks, hooks that
+  block withdrawals, etc.). Before this tool recommends a V4 pool it should
+  check whether the pool has a hook attached and, if so, run/report a
+  security read (audit status, hook permissions, known-bad-hook lists) —
+  the same "don't recommend a deposit outright" caution this project already
+  applies to volatility risk, extended to contract risk. `query-token-audit`
+  covers this checking pattern for tokens already; a pool-level analogue is
+  the gap.
+- **Robinhood Chain compatibility.** Robinhood has been building a chain for
+  its own tokenized-stock offering. If/when RWA stock-token LPs exist there
+  with data comparably accessible to Binance's Web3 APIs, extending `stocks`
+  / `vol` / `scan` to include it turns this from a Binance-only screener into
+  a cross-venue one — genuinely more useful for "which venue's LP on this
+  same underlying is actually the better deal", not just which pool within
+  one venue.
+- **Exact double-barrier probability**, replacing the current conservative
+  union-bound approximation for straddling ranges (`no_exit_probability`)
+  with the proper reflection-principle series — tightens the `0%` readings
+  narrow ranges currently get, without changing the safe-direction bias.
+- **Effective execution-price model for single-sided ranges** — right now a
+  `--side sell`/`buy` range reuses the IL-vs-hold formula as a cost proxy;
+  the real question ("what average price do I actually sell/buy at, versus
+  a plain limit order at the boundary") needs its own model, not a borrowed
+  one.
+- **Volatility-uncertainty-aware scoring.** `vol_ratio` currently uses a
+  point estimate of realized vol; a short kline history makes that noisy.
+  Widening `σ` by a confidence bound (or moving to a GARCH-style estimator)
+  before computing `vol_ratio` would stop a thin data window from reading as
+  false precision.
+- **Automatic corporate-action gating.** The "check for upcoming corporate
+  actions" step is currently a manual reminder in `SKILL.md`; it should be a
+  direct call to `binance-tokenized-securities-info`'s asset-market-status
+  API that widens the effective vol estimate or flags the pool outright when
+  an earnings/dividend/split date falls inside the recommendation horizon.
+- **Scheduled rebalance monitoring.** `rebalance-check` is pull-only today.
+  Wiring it to a scheduled task (daily, say) that surfaces a notification
+  when a held position's `vol_ratio` or `p_active` drifts past a threshold
+  — still report-only, still routed through the confirmed `baw` execution
+  flow — turns "check when I remember to ask" into "get told when it
+  matters."
