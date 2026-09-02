@@ -415,7 +415,10 @@ def test_relative_volatility_none_when_coverage_too_sparse():
 
 # ---- resolve_pool_stock_and_quote ----
 
-STOCK_INDEX = {("56", "0xaaa"): {"ticker": "NVDA", "symbol": "NVDAB", "chainId": "56", "contractAddress": "0xaaa"}}
+STOCK_INDEX = {
+    ("56", "0xaaa"): {"ticker": "NVDA", "symbol": "NVDAB", "chainId": "56", "contractAddress": "0xaaa"},
+    ("56", "0xbbb"): {"ticker": "HOOD", "symbol": "HOODB", "chainId": "56", "contractAddress": "0xbbb"},
+}
 
 
 def test_resolve_pool_stock_and_quote_stablecoin_pair():
@@ -446,14 +449,49 @@ def test_resolve_pool_stock_and_quote_no_confirmed_bstock():
     ]}
     stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
     assert stock is None
-    assert pair_mode == "unknown"
+    assert pair_mode == "unsupported"
 
 
 def test_resolve_pool_stock_and_quote_no_second_token():
+    # only 1 unique asset -- not a 2-asset pool this tool can model
     info = {"binanceChainId": "56", "assetTokenList": [{"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"}]}
     stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
-    assert stock is not None
-    assert pair_mode == "unknown"
+    assert stock is None
+    assert pair_mode == "unsupported"
+
+
+def test_resolve_pool_stock_and_quote_three_assets_unsupported():
+    # a 3-asset weighted pool -- the two-asset E[IL] ~ sigma^2/8 model doesn't generalize to this
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"},
+        {"tokenAddress": "0x55d398326f99059ff775485246999027b3197955", "tokenSymbol": "USDT"},
+        {"tokenAddress": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", "tokenSymbol": "BNB"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock is None
+    assert pair_mode == "unsupported"
+
+
+def test_resolve_pool_stock_and_quote_dual_bstock_unsupported():
+    # two confirmed bStocks in the same pool -- ambiguous which one is "the" stock leg
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"},
+        {"tokenAddress": "0xbbb", "tokenSymbol": "HOODB"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock is None
+    assert pair_mode == "unsupported"
+
+
+def test_resolve_pool_stock_and_quote_duplicate_address_unsupported():
+    # same token listed twice (data glitch) -- only 1 unique asset, not a real 2-asset pool
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"},
+        {"tokenAddress": "0xAAA", "tokenSymbol": "NVDAB"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock is None
+    assert pair_mode == "unsupported"
 
 
 # ---- pool_risk_flags: V4 hard block ----

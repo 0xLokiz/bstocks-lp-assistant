@@ -269,25 +269,30 @@ def relative_annualized_volatility(stock_klines, quote_klines, interval="1d"):
 def resolve_pool_stock_and_quote(pool, info, stock_index):
     """Identify the confirmed bStock side and the paired ("quote") token of a pool from its
     on-chain `assetTokenList`, and classify the pair. Returns (stock, chain_id, quote_addr,
-    pair_mode) -- `stock` is None if `assetTokenList` doesn't confirm a bStock (don't trust a
-    name-match guess instead, see run_scan); `pair_mode` is "stablecoin"/"non_stablecoin" once
-    `stock` is resolved, "unknown" if a second distinct token couldn't be identified. Shared by
-    run_scan's Pass 1 and rebalance-check's fallback path for a held position outside the
-    scanned market set, so both classify a pool's pair the same way.
+    pair_mode).
+
+    Only pools with exactly 2 distinct on-chain assets, exactly one of which is a confirmed
+    bStock, are supported: the IL model this tool uses (E[IL] ~ sigma^2/8, "LP as short ATM
+    straddle") assumes a two-asset pool and doesn't generalize to 3+-asset weighted pools or
+    dual-bStock pairs without a different formula. Anything else -- wrong asset count, zero
+    confirmed bStocks (don't trust a name-match guess instead, see run_scan), or more than one
+    -- returns stock=None, pair_mode="unsupported" rather than silently picking one asset out
+    of several and mis-scoring the pool. `pair_mode` is "stablecoin"/"non_stablecoin" once
+    `stock` is resolved. Shared by run_scan's Pass 1 and rebalance-check's fallback path for a
+    held position outside the scanned market set, so both classify a pool's pair the same way.
     """
     chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
     asset_list = info.get("assetTokenList") or []
-    stock = next(
-        (stock_index[(chain_id, a["tokenAddress"].lower())]
-         for a in asset_list if (chain_id, a["tokenAddress"].lower()) in stock_index),
-        None,
-    )
-    if stock is None:
-        return None, chain_id, None, "unknown"
-    quote = next((a for a in asset_list if a["tokenAddress"].lower() != stock["contractAddress"].lower()), None)
-    if quote is None:
-        return stock, chain_id, None, "unknown"
-    quote_addr = quote["tokenAddress"].lower()
+    unique_addresses = {a["tokenAddress"].lower() for a in asset_list}
+    if len(unique_addresses) != 2:
+        return None, chain_id, None, "unsupported"
+
+    bstock_matches = [stock_index[(chain_id, addr)] for addr in unique_addresses if (chain_id, addr) in stock_index]
+    if len(bstock_matches) != 1:
+        return None, chain_id, None, "unsupported"
+
+    stock = bstock_matches[0]
+    quote_addr = next(addr for addr in unique_addresses if addr != stock["contractAddress"].lower())
     pair_mode = "stablecoin" if is_stablecoin(chain_id, quote_addr) else "non_stablecoin"
     return stock, chain_id, quote_addr, pair_mode
 
@@ -296,7 +301,7 @@ def resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode):
     """Sequential, single-pool volatility resolution -- for use where only one pool needs
     evaluating (e.g. rebalance-check's fallback), where run_scan's Pass 1 concurrent-batch
     machinery would be overkill for just one. Returns sigma, or None if it couldn't be computed."""
-    if pair_mode == "unknown" or stock is None:
+    if pair_mode == "unsupported" or stock is None:
         return None
     stock_klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
     if pair_mode == "stablecoin":
@@ -937,13 +942,14 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote(pool, info, stock_index)
         if stock is None:
             # name-matching was only ever a pre-filter guess (see the widened matcher above);
-            # if the authoritative on-chain assetTokenList doesn't confirm a bStock in this
-            # pool, trusting the name guess anyway risks attributing volatility/apy data to
-            # the wrong token entirely. Skip rather than silently mis-score the pool.
-            unscoreable.append((pool.get("investmentName"), "assetTokenList did not confirm a bStock"))
-            continue
-        if pair_mode == "unknown":
-            unscoreable.append((pool.get("investmentName"), "could not identify the paired (quote) token"))
+            # if the authoritative on-chain assetTokenList doesn't confirm exactly one bStock
+            # paired with exactly one other asset, trusting the name guess anyway risks
+            # attributing volatility/apy data to the wrong token, or applying a two-asset IL
+            # model to a pool this tool can't actually model. Skip rather than silently
+            # mis-score it.
+            unscoreable.append((pool.get("investmentName"),
+                                 "assetTokenList did not confirm exactly one bStock paired with one other asset "
+                                 "(unsupported pool structure)"))
             continue
         resolved.append((pool, info, stock, chain_id, quote_addr, pair_mode))
         kline_keys.add((stock["chainId"], stock["contractAddress"]))
@@ -1158,10 +1164,9 @@ def cmd_range(args):
         stock_index = build_stock_index(stock_tokens)
         stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
         if not stock:
-            print("could not identify a tokenized-stock token in this pool's assetTokenList", file=sys.stderr)
-            sys.exit(1)
-        if pair_mode == "unknown":
-            print("could not identify the pool's paired (quote) token -- cannot compute IL, aborting.", file=sys.stderr)
+            print("could not confirm exactly one bStock paired with exactly one other asset in this "
+                  "pool's assetTokenList (unsupported pool structure) -- cannot compute IL, aborting.",
+                  file=sys.stderr)
             sys.exit(1)
         sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode)
         pair_note = "" if pair_mode == "stablecoin" else " -- non-stablecoin pair, vol is relative to the quote asset"
