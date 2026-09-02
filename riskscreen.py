@@ -1337,10 +1337,18 @@ def cmd_recommend(args):
         stock_tokens = fetch_stock_tokens()
         stock_index = build_stock_index(stock_tokens)
         held = lp_positions_on_stock_tokens(data, stock_index)
-    except Exception:
-        held = []
+        portfolio_error = None
+    except Exception as e:
+        # A fetch failure (expired session, network error, malformed response) is not the
+        # same claim as "we checked and you hold nothing" -- conflating them (as this used to
+        # do by just falling back to held=[]) can tell a user they have no positions when the
+        # real answer is "we don't know." Surface it distinctly instead.
+        held, portfolio_error = [], str(e)
 
-    if held:
+    if portfolio_error:
+        print(f"\nCould not check your current bStock LP positions ({portfolio_error}) -- "
+              f"this is NOT the same as confirming you hold none. Run `positions` directly to retry.")
+    elif held:
         held_tickers = {h["stock"]["ticker"] for h in held}
         print(f"\nYou currently hold {len(held)} bStock LP position(s) ({', '.join(sorted(held_tickers))}). "
               f"Run `rebalance-check` to compare them against this market.")
