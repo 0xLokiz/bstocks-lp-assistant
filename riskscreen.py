@@ -301,6 +301,29 @@ def fetch_lp_investments():
     return body["data"]["list"]
 
 
+MAX_SANE_FEE_RATE = 0.05  # 5% per swap -- generous; real fee tiers top out around 1%
+
+
+def fee_rate_anomaly(info):
+    """Flag a pool whose `feeRate` (fraction per swap) is outside a sane range -- a strong
+    signal the platform's reported apy/apyBps for this pool is a data or dynamic-fee-hook
+    artifact, not a durable rate. V4 pools can carry custom hooks with arbitrary (including
+    broken or malicious) fee logic; this is a cheap sanity check, not a full hook audit --
+    see README/SKILL.md roadmap for the latter. Returns a warning string, or None if sane.
+    """
+    fee_rate = info.get("feeRate")
+    if fee_rate is None:
+        return None
+    try:
+        fee_rate = float(fee_rate)
+    except (TypeError, ValueError):
+        return None
+    if fee_rate > MAX_SANE_FEE_RATE:
+        return (f"feeRate={fee_rate*100:.2f}% per swap is outside a sane range (>{MAX_SANE_FEE_RATE*100:.0f}%) "
+                f"-- its apy figure is likely a data or dynamic-fee-hook artifact, not a trustworthy rate")
+    return None
+
+
 def fetch_investment_info(investment_id):
     body = baw("defi", "investment-info", "--investmentId", investment_id)
     if not body.get("success"):
@@ -398,6 +421,7 @@ def cmd_scan(args):
     print(f"found {len(candidates)}/{len(pools)} LP pools naming a tokenized-stock symbol", file=sys.stderr)
 
     results = []
+    flagged = []
     vol_cache = {}
     for pool, name_hit in candidates:
         try:
@@ -405,6 +429,11 @@ def cmd_scan(args):
         except Exception:
             continue
         time.sleep(0.1)
+
+        anomaly = fee_rate_anomaly(info)
+        if anomaly:
+            flagged.append((pool.get("investmentName"), pool.get("protocolName"), anomaly))
+            continue
 
         chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
         asset_list = info.get("assetTokenList") or []
@@ -480,6 +509,11 @@ def cmd_scan(args):
         print("\n('vol_ratio' = realized vol / breakeven vol, the pool's own is-it-cheap "
               "signal, independent of what range you'd hold it in -- see README.)")
 
+    if flagged:
+        print(f"\n{len(flagged)} pool(s) excluded from ranking -- anomalous feeRate:")
+        for name, protocol, anomaly in flagged:
+            print(f"  {name} ({protocol}): {anomaly}")
+
     if args.json:
         print(json.dumps(results[: args.top], indent=2))
 
@@ -487,6 +521,11 @@ def cmd_scan(args):
 def cmd_range(args):
     if args.investment_id:
         info = fetch_investment_info(args.investment_id)
+        anomaly = fee_rate_anomaly(info)
+        if anomaly:
+            print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}): {anomaly}", file=sys.stderr)
+            print("Proceeding anyway since an investmentId was given explicitly, but treat every "
+                  "number below as unreliable -- do not recommend this pool.\n", file=sys.stderr)
         apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
         asset_list = info.get("assetTokenList") or []
         chain_id = info.get("binanceChainId")
@@ -605,6 +644,9 @@ def cmd_rebalance_check(args):
                 info = fetch_investment_info(inv_id)
             except Exception:
                 continue
+            held_anomaly = fee_rate_anomaly(info)
+            if held_anomaly:
+                print(f"  WARNING: your held {h['protocolName']} position itself: {held_anomaly}")
             apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
             sigma = annualized_volatility(klines)
@@ -619,6 +661,8 @@ def cmd_rebalance_check(args):
             try:
                 info = fetch_investment_info(m["investmentId"])
             except Exception:
+                continue
+            if fee_rate_anomaly(info):
                 continue
             apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)

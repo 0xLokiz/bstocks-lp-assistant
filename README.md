@@ -103,6 +103,18 @@ narrower range can show a higher `net_apy` number but at a `p_active` so low
 it's misleading to call it "safe". Both numbers are always shown together,
 never the APY alone.
 
+## Fee-rate sanity check
+
+V3/V4 pools can report wildly unreliable `apy` figures — most concretely, a
+Uniswap V4 QQQB-USDC pool showed `apy=1,658.77%` against 77.86% on the
+equivalent V3 pool for the same pair, traced to a `feeRate` of `8.38861`
+(838.86% per swap) in `investment-info` — not a valid fee tier, and a strong
+signal the platform's apy computation for that pool is a data or
+dynamic-fee-hook artifact. `riskscreen.py` now filters out any pool with
+`feeRate` above 5% per swap before ranking (`fee_rate_anomaly`), and reports
+what was excluded and why rather than silently dropping it. This is a cheap
+sanity check on the input data, not a hook-security audit — see Roadmap.
+
 ## Caveats (read before trusting the numbers)
 
 - **Historical vol is backward-looking.** Stock tokens can gap hard around

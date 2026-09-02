@@ -198,6 +198,21 @@ pool and range from this skill's output:
    `defi redeem` / `defi lp-remove` on the old one, then `defi deposit` /
    `defi lp-add` on the new one — two separate confirmed actions, not one.
 
+## Fee-rate sanity check
+
+`scan`/`range`/`rebalance-check` already filter out pools whose
+`investment-info.feeRate` exceeds 5% per swap (`fee_rate_anomaly` in
+`riskscreen.py`) — a strong signal the reported apy is a data or
+dynamic-fee-hook artifact rather than a durable rate. This has caught real
+cases: a Uniswap V4 QQQB-USDC pool reported `apy=1658.77%` versus 77.86% on
+the equivalent V3 pool for the same pair, driven by a `feeRate` of `8.38861`
+(838.86% per swap — not a valid fee tier). `scan` prints excluded pools with
+the reason rather than silently dropping them; `range --investmentId` warns
+loudly but still shows the numbers if the user explicitly asked for that
+pool by ID — call out clearly that they're unreliable if so. This is a
+cheap data-quality check, not a hook security audit — see the Roadmap in
+README.md for the deeper V4-hook-safety item this doesn't replace.
+
 ## Before presenting results to the user
 
 1. **Check for upcoming corporate actions** on any pool you're about to
