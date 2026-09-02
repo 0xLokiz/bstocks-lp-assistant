@@ -152,6 +152,31 @@ def vol_richness_ratio(sigma_realized, apy):
     return sigma_realized / be
 
 
+RICHNESS_BANDS = [(0.5, "Rich"), (1.0, "Fair")]  # else "Cheap"
+
+
+def richness_grade(vol_ratio):
+    """Qualitative tier for vol_ratio, the "Richness Score": Rich (<0.5) pays well above
+    realized risk, Fair (0.5-1.0) a modest edge, Cheap (>=1.0) doesn't clear its own risk bar."""
+    if vol_ratio is None:
+        return "n/a"
+    for ceiling, label in RICHNESS_BANDS:
+        if vol_ratio < ceiling:
+            return label
+    return "Cheap"
+
+
+def confidence_grade(p_active):
+    """Qualitative tier for p_active (stay-in-range / execution probability)."""
+    if p_active is None:
+        return "n/a"
+    if p_active >= 0.8:
+        return "High"
+    if p_active >= SAFETY_P_ACTIVE_FLOOR:
+        return "Moderate"
+    return "Low"
+
+
 def risk_adjusted_apy(apy, sigma_annual):
     il = expected_il_fraction(sigma_annual)
     net = apy - il
@@ -390,8 +415,11 @@ def cmd_vol(args):
             print(f"{t['symbol']} (chain {t['chainId']}): not enough kline history")
             continue
         il = expected_il_fraction(sigma)
-        be = breakeven_volatility(args.apy) if args.apy else None
-        be_str = f", breakeven vol @ {args.apy*100:.0f}% APY = {be*100:.2f}%" if be else ""
+        if args.apy:
+            grade = richness_grade(vol_richness_ratio(sigma, args.apy))
+            be_str = f", Richness Score @ {args.apy*100:.0f}% APY = {grade}"
+        else:
+            be_str = ""
         print(f"{t['symbol']} (chain {t['chainId']}): annualized vol = {sigma*100:.2f}%, "
               f"est. full-range IL/yr = {il*100:.2f}%{be_str}")
 
@@ -471,43 +499,39 @@ def cmd_scan(args):
             "investmentId": pool.get("investmentId"),
             "stock_ticker": stock["ticker"],
             "tvl": float(pool.get("tvl") or 0),
+            "grade": richness_grade(scored["vol_ratio"]),
             **scored,
         }
         if args.with_range:
             _, best = recommend_range(apy, sigma, side="straddle")
+            best["confidence"] = confidence_grade(best["p_active"])
             result["best_range"] = best
         results.append(result)
 
     results.sort(key=lambda r: r["net_apy"], reverse=True)
 
     if args.with_range:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'vol_ratio':>10}"
-              f"{'full-net':>10}{'best +/-%':>10}{'range-net':>11}{'p_active':>10}{'tvl':>14}")
+        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'grade':>7}"
+              f"{'best +/-%':>10}{'range-net':>11}{'confidence':>12}{'tvl':>14}")
         for r in results[: args.top]:
             b = r["best_range"]
             width = f"{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full"
-            vr = f"{r['vol_ratio']:.2f}" if r["vol_ratio"] is not None else "n/a"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
-                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{vr:>10}"
-                  f"{r['net_apy']*100:>9.2f}%{width:>10}"
-                  f"{b['net_apy']*100:>10.2f}%{b['p_active']*100:>9.0f}%"
+                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['grade']:>7}"
+                  f"{width:>10}{b['net_apy']*100:>10.2f}%{b['confidence']:>12}"
                   f"{r['tvl']:>14,.0f}")
-        print("\n('vol_ratio' = realized vol / breakeven vol -- <1 means the pool pays more "
-              "than the realized risk implies, the 'scientifically cheap' signal; "
-              "'best +/-%' = recommended symmetric range width; 'range-net' assumes an LP "
-              "actively holding that range; run `range --investmentId <id>` for the full "
-              "width-by-width breakdown, or `--side sell/buy` for single-sided limit-order-style "
-              "ranges, on one pool.)")
+        print("\n(grade = Richness Score tier, vol_ratio bucketed Rich/Fair/Cheap; "
+              "confidence = probability of the recommended range staying active a year, "
+              "bucketed High/Moderate/Low. Full numbers: --json.)")
     else:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'est.IL':>9}{'net_apy':>10}{'vol_ratio':>10}{'tvl':>14}")
+        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}")
         for r in results[: args.top]:
-            vr = f"{r['vol_ratio']:.2f}" if r["vol_ratio"] is not None else "n/a"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
-                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['expected_il']*100:>8.2f}%"
-                  f"{r['net_apy']*100:>9.2f}%{vr:>10}"
+                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
+                  f"{r['net_apy']*100:>9.2f}%{r['grade']:>7}"
                   f"{r['tvl']:>14,.0f}")
-        print("\n('vol_ratio' = realized vol / breakeven vol, the pool's own is-it-cheap "
-              "signal, independent of what range you'd hold it in -- see README.)")
+        print("\n(grade = Richness Score tier -- realized vol vs. this pool's breakeven vol, "
+              "bucketed Rich/Fair/Cheap. Full numbers: --json.)")
 
     if flagged:
         print(f"\n{len(flagged)} pool(s) excluded from ranking -- anomalous feeRate:")
@@ -559,43 +583,30 @@ def cmd_range(args):
         sys.exit(1)
 
     vol_ratio = vol_richness_ratio(sigma, apy)
-    vr_str = f"{vol_ratio:.2f}" if vol_ratio is not None else "n/a"
-    verdict = "richly priced (pays more than realized risk)" if (vol_ratio is not None and vol_ratio < 1) \
-        else "cheaply priced (fee income may not cover realized risk)"
-    print(f"{label} -- annualized vol {sigma*100:.2f}%")
-    print(f"breakeven vol (sigma*) {breakeven_volatility(apy)*100:.2f}%  |  "
-          f"vol_ratio (realized/breakeven) = {vr_str}  ->  {verdict}")
-    print("(vol_ratio is range-independent -- it's a property of this pool's APY vs the "
-          "token's own volatility, not of which range below you'd pick.)\n")
+    grade = richness_grade(vol_ratio)
+    print(f"{label} -- vol {sigma*100:.1f}%  |  Richness Score: {grade} (vol_ratio {vol_ratio:.2f})\n")
 
     rows, best = recommend_range(apy, sigma, side=args.side)
     if args.side == "straddle":
-        print(f"{'range':>10}{'concentration':>14}{'p_stay':>8}{'eff.apy':>10}{'est.IL':>9}{'net_apy':>10}")
+        print(f"{'range':>10}{'concentration':>14}{'confidence':>12}{'eff.apy':>10}{'net_apy':>10}")
         for r in rows:
             width = f"+/-{(r['pb']-1)*100:.0f}%" if r["pb"] is not None else "full"
             marker = "  <- recommended" if r is best else ""
-            print(f"{width:>10}{r['concentration']:>14.2f}{r['p_active']*100:>7.0f}%"
-                  f"{r['effective_apy']*100:>9.2f}%{r['expected_il']*100:>8.2f}%"
-                  f"{r['net_apy']*100:>9.2f}%{marker}")
-        print(f"\n(recommended = highest net_apy among ranges with >={SAFETY_P_ACTIVE_FLOOR*100:.0f}% "
-              f"chance of staying in range over 1yr -- that's the 'safety' floor. Narrower ranges "
-              f"earn more fee APY per dollar but exit the range more often, at which point they stop "
-              f"earning fees entirely until rebalanced.)")
+            print(f"{width:>10}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
+                  f"{r['effective_apy']*100:>9.2f}%{r['net_apy']*100:>9.2f}%{marker}")
+        print(f"\n(confidence = probability of staying in range a year, bucketed High/Moderate/Low; "
+              f"recommended = best net_apy at Moderate-or-better confidence. Full numbers: --json on scan.)")
     else:
-        verb = "rises to" if args.side == "sell" else "falls to"
-        print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'p_execute':>10}{'eff.apy':>10}{'net_apy':>10}")
+        print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'confidence':>12}{'net_apy':>10}")
         for r in rows:
             offset_pct = abs((r["pa"] if args.side == "sell" else r["pb"]) - 1) * 100
             band = f"[{r['pa']:.2f}, {r['pb']:.2f}]x"
             marker = "  <- recommended" if r is best else ""
-            print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{r['p_active']*100:>9.0f}%"
-                  f"{r['effective_apy']*100:>9.2f}%{r['net_apy']*100:>9.2f}%{marker}")
-        print(f"\n(this places a concentrated range entirely {'above' if args.side == 'sell' else 'below'} "
-              f"the current price -- a yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order: "
-              f"it only earns fees once price {verb} the band, and 'p_execute' is the probability "
-              f"that ever happens within a year. Known simplification: 'net_apy' still uses the "
-              f"IL-vs-hold formula as a generic liquidity-cost proxy, not a precise effective-execution-"
-              f"price model -- see SKILL.md.)")
+            print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
+                  f"{r['net_apy']*100:>9.2f}%{marker}")
+        verb = "rises into" if args.side == "sell" else "falls into"
+        print(f"\n(yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order -- earns fees "
+              f"only once price {verb} the band; confidence = probability that ever happens within a year.)")
 
 
 def cmd_positions(args):
@@ -630,9 +641,7 @@ def cmd_rebalance_check(args):
     market = fetch_lp_investments()
     market_by_id = {m["investmentId"]: m for m in market}
 
-    print(f"\n{'held pool (ticker)':<28}{'held vol_ratio':>16}{'best market vol_ratio':>24}{'gap':>10}")
-    print("(vol_ratio = realized vol / breakeven vol -- lower is better; a held position with a "
-          "notably higher ratio than the best market option is the one worth reconsidering)\n")
+    print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
     for h in held:
         inv_ids = h["investmentIds"] or []
         held_ratio = None
@@ -675,14 +684,10 @@ def cmd_rebalance_check(args):
         best_market_ratio = min(candidates) if candidates else None
 
         label = f"{h['protocolName']} ({h['stock']['ticker']})"
-        hs = f"{held_ratio:.2f}" if held_ratio is not None else "n/a"
-        bs = f"{best_market_ratio:.2f}" if best_market_ratio is not None else "n/a"
-        gap = f"{held_ratio - best_market_ratio:+.2f}" if held_ratio is not None and best_market_ratio is not None else "n/a"
-        print(f"{label:<28}{hs:>16}{bs:>24}{gap:>10}")
+        print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}")
 
-    print("\nThis is a recommendation only -- nothing was moved. To act on a suggestion, use "
-          "`baw defi redeem` / `defi lp-remove` then `defi deposit` / `defi lp-add` via the "
-          "binance-agentic-wallet skill, with its normal preview + confirmation flow.")
+    print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
+          "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
 
 
 def main():

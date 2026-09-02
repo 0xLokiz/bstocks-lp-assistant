@@ -5,6 +5,29 @@ description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStoc
 
 # bStocks LP Assistant
 
+## Communication style
+
+You are an **assistant**, not a research report generator — respond the way
+a sharp desk analyst would in a Slack DM, not the way a whitepaper would.
+
+- **Lead with the answer.** First line is the verdict (a grade, a
+  recommended range, a yes/no on rebalancing), not a restatement of what
+  you're about to compute or which flags you passed.
+- **Chart first, prose second.** Whenever `scan`/`range` produces a
+  candidate set, show it as a chart before any text — see "Visualizing
+  results". Keep any accompanying text to 2-3 sentences.
+- **Speak in grades, not decimals, by default.** Lead with Richness Score
+  (Rich/Fair/Cheap) and confidence (High/Moderate/Low) — the tiers `scan`/
+  `range` already print. Surface a raw number (`vol_ratio`, `p_active`) only
+  if the user asks for precision or you're citing evidence for the verdict.
+- **One caveat, not the list.** Pick the single caveat most relevant to
+  *this* answer (a pending earnings date, a low-confidence range, a thin
+  kline history) instead of reciting every simplification this skill has.
+  The full caveat list lives in README.md for when someone asks "why".
+- **No filler.** Don't narrate tool calls ("let me check the pools..."),
+  don't repeat the question back, don't hedge with disclaimers beyond the
+  one relevant caveat above.
+
 ## Why this exists
 
 Headline LP APY is compensation for taking on impermanent loss (IL), and IL
@@ -68,15 +91,24 @@ vol_ratio              = σ_realized / σ*     -- <1: pool pays more than the ri
                                                  risk actually observed (cheap premium, bad deal)
 ```
 
-**`vol_ratio` is the primary score** — it's range-independent by
-construction (concentration multiplies fee income and IL by the same
-factor, so it cancels out of the breakeven equation), so it answers "is
-this pool's APY fundamentally well-priced for this token's volatility"
-before you even get to which range to hold it in. `net_apy` (`apy - E[IL]`)
-is still shown alongside as the economically intuitive number, but rank
-primarily on `vol_ratio` when the user is comparing pools with very
-different APY/vol magnitudes — a huge headline APY on an extremely volatile
-token can still have a worse `vol_ratio` than a modest APY on a calmer one.
+**`vol_ratio` is the primary score**, badged as the **Richness Score** and
+bucketed into a grade (`richness_grade` in `riskscreen.py`): **Rich**
+(`vol_ratio < 0.5`, pays well above realized risk), **Fair** (`0.5–1.0`, a
+modest edge), **Cheap** (`>= 1.0`, fee income likely doesn't clear its own
+risk bar). It's range-independent by construction (concentration multiplies
+fee income and IL by the same factor, so it cancels out of the breakeven
+equation), so it answers "is this pool's APY fundamentally well-priced for
+this token's volatility" before you even get to which range to hold it in.
+Lead with the grade in conversation; cite the raw `vol_ratio` only as
+supporting evidence. `net_apy` (`apy - E[IL]`) is still computed as the
+economically intuitive number, but rank primarily on the Richness Score
+when comparing pools with very different APY/vol magnitudes — a huge
+headline APY on an extremely volatile token can still be a worse deal than
+a modest APY on a calmer one.
+
+`p_active` (the range/order staying-active or execution probability) is
+similarly bucketed by `confidence_grade`: **High** (`>= 80%`), **Moderate**
+(`60–80%`, the recommendation floor), **Low** (`< 60%`).
 
 Caveat to surface if asked: realized volatility from a short kline history
 is itself a noisy estimate. Treat a `vol_ratio` computed from under ~30 days
@@ -134,22 +166,19 @@ range, not just the net_apy figure.
 
 ## Visualizing results
 
-The end goal is a recommendation the user can act on, not a wall of numbers
-— **prefer a chart over a raw table whenever presenting `scan --with-range`
-or `range` output to the user.** Use the Artifact tool or the visualize
-widget (see the `dataviz` skill for house style) to render:
+Use the Artifact tool or the visualize widget (see the `dataviz` skill for
+house style):
 
 - **`range` output**: a scatter of `p_active` (x) vs `net_apy` (y) across
-  the candidate ranges, with the recommended point visually distinct
-  (larger marker / accent color, gray for the rest) — this is the
-  safety-vs-yield tradeoff the user is actually deciding between.
-- **`scan` output**: a bar or dot chart of `vol_ratio` across the top
-  pools (lower is better), so "which pool is cheap" reads as a shape, not
-  a column of decimals.
+  the candidate ranges, recommended point visually distinct (larger marker
+  / accent color, gray for the rest) — the safety-vs-yield tradeoff the
+  user is actually deciding between.
+- **`scan` output**: a bar/dot chart of the Richness Score across the top
+  pools (lower `vol_ratio` = better), colored by grade, so "which pool is
+  cheap" reads as a shape, not a column of decimals.
 
-Keep the numeric table in the response text as well (some users want to
-copy the exact figures) — the chart supplements it, it doesn't replace the
-underlying data.
+Keep the numeric table in the response text too (some users want exact
+figures) — the chart supplements it, it doesn't replace it.
 
 ## Commands
 

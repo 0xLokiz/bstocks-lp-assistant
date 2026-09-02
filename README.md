@@ -73,12 +73,14 @@ vol_ratio           = σ_realized / σ*    -- <1: pool pays more than the realiz
                                           -- >1: fee income likely doesn't cover the realized risk (cheap, bad deal)
 ```
 
-`vol_ratio` is **range-independent** — concentration multiplies fee income
-and IL by the same factor, so it cancels out of the breakeven equation. It's
-a property of the pool's own APY vs. the token's volatility, not of which
-range you'd choose to hold it in — a much more apples-to-apples comparison
-across pools with wildly different APY/vol magnitudes than a raw APY
-ranking, or even the plain `net_apy` figure alone.
+`vol_ratio` — badged the **Richness Score** and bucketed **Rich**
+(`<0.5`) / **Fair** (`0.5–1.0`) / **Cheap** (`>=1.0`) — is
+**range-independent**: concentration multiplies fee income and IL by the
+same factor, so it cancels out of the breakeven equation. It's a property
+of the pool's own APY vs. the token's volatility, not of which range you'd
+choose to hold it in — a much more apples-to-apples comparison across pools
+with wildly different APY/vol magnitudes than a raw APY ranking, or even
+the plain `net_apy` figure alone.
 
 ### Concentrated (V3) ranges: market-making vs. limit orders
 
@@ -180,29 +182,32 @@ Validated end-to-end against a live `baw` session. Live output
 (`python riskscreen.py scan --top 8 --with-range`, BSC, 2026-09-02):
 
 ```
-pool                ticker        apy      vol vol_ratio  full-net best +/-%  range-net  p_active           tvl
-GMEB-USDT           GME       452.84%   23.73%      0.04   452.14%       50%    972.27%       91%        19,879
-AAPLB-USDT          AAPL      382.75%   32.64%      0.06   381.42%       50%    677.91%       75%        53,012
-GMEB-USDT           GME       296.20%   23.73%      0.05   295.50%       50%    635.38%       91%       137,657
-AAPLB-USDT          AAPL      230.28%   32.64%      0.08   228.95%       50%    406.61%       75%       438,462
-NVDAB-BNB           NVDA      123.94%   39.58%      0.13   121.98%       50%    175.56%       61%        42,844
-BNB-SPCXB           SPCX      125.01%   82.79%      0.26   116.44%      full    116.44%      100%     1,295,426
-HOODB-BNB           HOOD      112.87%   71.76%      0.24   106.43%      full    106.43%      100%        17,221
-NVDAB-USDT          NVDA      101.83%   39.58%      0.14    99.87%       50%    143.42%       61%        67,394
+pool                ticker        apy      vol  grade best +/-%  range-net  confidence           tvl
+GMEB-USDT           GME       426.06%   23.81%   Rich       50%    913.40%        High        19,848
+AAPLB-USDT          AAPL      364.19%   32.57%   Rich       50%    646.12%    Moderate        54,040
+GMEB-USDT           GME       256.48%   23.81%   Rich       50%    549.18%        High       136,619
+AAPLB-USDT          AAPL      219.90%   32.57%   Rich       50%    388.89%    Moderate       441,293
+NVDAB-BNB           NVDA      125.82%   39.59%   Rich       50%    178.25%    Moderate        42,924
+BNB-SPCXB           SPCX      125.87%   82.78%   Rich      full    117.30%        High     1,303,516
+HOODB-BNB           HOOD      123.21%   71.84%   Rich      full    116.76%        High        17,299
+NVDAB-USDT          NVDA      104.17%   39.59%   Rich       50%    146.78%    Moderate        67,397
+
+1 pool(s) excluded from ranking -- anomalous feeRate:
+  QQQB-USDC (Uniswap V4): feeRate=838.86% per swap outside a sane range -- see "Fee-rate sanity check"
 ```
 
-All eight of these top pools show `vol_ratio` well under 1 (0.04–0.26) —
-confirming the huge headline APYs genuinely reflect a large premium over
-realized volatility, not just an artifact of reading raw APY numbers.
+All eight ranked pools grade **Rich** — the headline APYs genuinely reflect
+a large premium over realized volatility, not just large-looking raw
+numbers. The excluded ninth (QQQB-USDC, Uniswap V4) shows the sanity filter
+working, not the ranking failing to find it.
 
 Range sweep for NVDAB-USDT (`range --investmentId 9c97dee1...d405de7ec7f79d`):
-breakeven vol 212.57% vs. realized 39.58% (`vol_ratio` 0.19, richly priced).
-Full-range nets 54.51% APY; the recommended ±50% range (61% probability of
-never exiting over a year — the "safety" floor) nets 77.48%. A single-sided
-`--side sell` sweep on the same pool shows a tight ±5%-above-price band with
-90% probability of ever executing and a >1000% net APY while active — the
-"use an LP range as a limit sell order" case point 1 in the iteration list
-asked for.
+Richness Score **Rich** (`vol_ratio` 0.18). Full-range nets 59.18% APY at
+**High** confidence; the recommended ±50% range trades down to **Moderate**
+confidence for 84.23% net. A `--side sell` sweep on the same pool shows a
+tight ±5%-above-price band at **High** confidence (>1000% net APY while
+active) — the "use an LP range as a limit sell order" case from the
+iteration history.
 
 ## Binance Agent OS Mini Hackathon — Track A submission
 
