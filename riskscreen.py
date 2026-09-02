@@ -60,6 +60,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 MAX_CONCURRENT_BAW_CALLS = 8  # bounds parallel `baw`/kline fetches -- see run_scan's Pass 1
 
@@ -110,16 +111,91 @@ INTERVAL_TO_ANNUALIZATION = {
 }
 
 
-def annualized_volatility(klines, interval="1d"):
-    closes = [float(c[4]) for c in klines if float(c[4]) > 0]
-    if len(closes) < 3:
+def _log_return_volatility(values, interval="1d"):
+    """Shared core: annualized stdev of log-returns of a price-like series."""
+    if len(values) < 3:
         return None
-    log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    log_returns = [math.log(values[i] / values[i - 1]) for i in range(1, len(values))]
     n = len(log_returns)
     mean = sum(log_returns) / n
     variance = sum((r - mean) ** 2 for r in log_returns) / (n - 1)
     periods_per_year = INTERVAL_TO_ANNUALIZATION.get(interval, DAYS_PER_YEAR)
     return math.sqrt(variance * periods_per_year)
+
+
+def annualized_volatility(klines, interval="1d"):
+    closes = [float(c[4]) for c in klines if float(c[4]) > 0]
+    return _log_return_volatility(closes, interval)
+
+
+# BSC/ETH stablecoins this product's LP pools are commonly quoted against. Addresses lowercased,
+# keyed (chainId, address) -- matches binance-agentic-wallet's Common Token Addresses table.
+STABLECOIN_ADDRESSES = {
+    ("56", "0x55d398326f99059ff775485246999027b3197955"),  # USDT (BSC)
+    ("56", "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"),  # USDC (BSC)
+    ("56", "0xce24439f2d9c6a2289f741120fe202248b666666"),  # U (BSC)
+    ("56", "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d"),  # USD1 (BSC)
+    ("1", "0xdac17f958d2ee523a2206206994597c13d831ec7"),   # USDT (Ethereum)
+    ("1", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),   # USDC (Ethereum)
+}
+
+
+def is_stablecoin(chain_id, address):
+    return (str(chain_id), address.lower()) in STABLECOIN_ADDRESSES
+
+
+def relative_annualized_volatility(stock_klines, quote_klines, interval="1d"):
+    """Annualized volatility of log(P_stock / P_quote), for pools quoted against a
+    non-stablecoin asset (e.g. bStock/BNB). IL for such a pool depends on the *relative*
+    price move between the two pooled assets, not the bStock's volatility alone -- ignoring
+    the quote asset's own volatility understates risk whenever it moves too (BNB is not flat).
+    Aligns the two kline series by candle open-time; only the overlapping window is used, so
+    a short overlap (thinly-traded quote asset, gappy data) can still return None.
+    """
+    stock_by_time = {c[0]: float(c[4]) for c in stock_klines if float(c[4]) > 0}
+    quote_by_time = {c[0]: float(c[4]) for c in quote_klines if float(c[4]) > 0}
+    common_times = sorted(set(stock_by_time) & set(quote_by_time))
+    ratios = [stock_by_time[t] / quote_by_time[t] for t in common_times]
+    return _log_return_volatility(ratios, interval)
+
+
+def resolve_pool_stock_and_quote(pool, info, stock_index):
+    """Identify the confirmed bStock side and the paired ("quote") token of a pool from its
+    on-chain `assetTokenList`, and classify the pair. Returns (stock, chain_id, quote_addr,
+    pair_mode) -- `stock` is None if `assetTokenList` doesn't confirm a bStock (don't trust a
+    name-match guess instead, see run_scan); `pair_mode` is "stablecoin"/"non_stablecoin" once
+    `stock` is resolved, "unknown" if a second distinct token couldn't be identified. Shared by
+    run_scan's Pass 1 and rebalance-check's fallback path for a held position outside the
+    scanned market set, so both classify a pool's pair the same way.
+    """
+    chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
+    asset_list = info.get("assetTokenList") or []
+    stock = next(
+        (stock_index[(chain_id, a["tokenAddress"].lower())]
+         for a in asset_list if (chain_id, a["tokenAddress"].lower()) in stock_index),
+        None,
+    )
+    if stock is None:
+        return None, chain_id, None, "unknown"
+    quote = next((a for a in asset_list if a["tokenAddress"].lower() != stock["contractAddress"].lower()), None)
+    if quote is None:
+        return stock, chain_id, None, "unknown"
+    quote_addr = quote["tokenAddress"].lower()
+    pair_mode = "stablecoin" if is_stablecoin(chain_id, quote_addr) else "non_stablecoin"
+    return stock, chain_id, quote_addr, pair_mode
+
+
+def resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode):
+    """Sequential, single-pool volatility resolution -- for use where only one pool needs
+    evaluating (e.g. rebalance-check's fallback), where run_scan's Pass 1 concurrent-batch
+    machinery would be overkill for just one. Returns sigma, or None if it couldn't be computed."""
+    if pair_mode == "unknown" or stock is None:
+        return None
+    stock_klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
+    if pair_mode == "stablecoin":
+        return annualized_volatility(stock_klines)
+    quote_klines = fetch_klines(chain_id, quote_addr, limit=91)
+    return relative_annualized_volatility(stock_klines, quote_klines)
 
 
 def expected_il_fraction(sigma_annual):
@@ -403,7 +479,8 @@ MIN_PROTOCOL_SECURITY_SCORE = 50  # `defi protocol-info` securityScore floor (0-
 def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
                      max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
                      peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
-                     min_security_score=MIN_PROTOCOL_SECURITY_SCORE):
+                     min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
+                     block_unknown_v4_hooks=True):
     """Aggregate pre-deposit sanity/safety screen for one LP pool -- generalizes the original
     single feeRate check into independent signals for the two questions that actually matter
     before recommending a deposit: is the advertised yield even real (data-plausibility), and
@@ -438,8 +515,23 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
         case: Uniswap's own score gives no warning). This signal is a weak floor against
         obviously disreputable protocols, not a substitute for the hook-level audit tracked in
         the README roadmap -- do not present it as though it clears a V4 pool as hook-safe.
+      - `block_unknown_v4_hooks` (default True): Uniswap V4 pools can carry an arbitrary
+        custom hook -- logic outside the audited core AMM, and this product has no API access
+        to a pool's hook address, permissions, or audit status (see the securityScore
+        limitation above -- protocol-level score can't see it either). Per the PM/QA review,
+        contract risk this unknown is a hard block by default, not just a caveat: every V4
+        pool is flagged until real hook-inspection data is available, not only ones with an
+        already-visible symptom like an extreme feeRate. Pass False to disable for an
+        already-vetted pool or explicit user override.
     """
     flags = []
+
+    protocol_name = (pool.get("protocolName") or info.get("protocolName") or "")
+    if block_unknown_v4_hooks and "v4" in protocol_name.lower():
+        flags.append(f"{protocol_name}: V4 pools can carry an arbitrary custom hook "
+                      f"with unaudited logic, and this tool has no way to inspect the hook's address, "
+                      f"permissions, or audit status. Blocked by default until that's available "
+                      f"(pass block_unknown_v4_hooks=False / --allow-v4 to override)")
 
     fee_rate = info.get("feeRate")
     if fee_rate is not None:
@@ -477,6 +569,28 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
             pass
 
     return flags
+
+
+def evaluate_pool(pool, info, sigma, apy, peer_apys=None, protocol_security_score=None,
+                   max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
+                   peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
+                   min_security_score=MIN_PROTOCOL_SECURITY_SCORE, block_unknown_v4_hooks=True):
+    """The one evaluation path for a pool with an already-resolved sigma/apy -- used by both
+    `run_scan` and `rebalance-check`'s market comparison, so the two can never reach
+    inconsistent safety conclusions about the same pool. (Before this existed, rebalance-check
+    ran its own stripped-down check that skipped peer_apys/protocol_security_score entirely --
+    a pool `scan` would flag could still show up there as a "better" rebalance target.)
+
+    Returns {"flags": [...], "scored": {...}}. `scored` (from risk_adjusted_apy) is always
+    computed, even when flags is non-empty, so a caller can show the numbers alongside a
+    prominent "don't trust this" -- but never rank or recommend a pool with any flags.
+    """
+    flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=protocol_security_score,
+                             max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl_usd,
+                             peer_outlier_multiple=peer_outlier_multiple,
+                             min_security_score=min_security_score,
+                             block_unknown_v4_hooks=block_unknown_v4_hooks)
+    return {"flags": flags, "scored": risk_adjusted_apy(apy, sigma)}
 
 
 def fetch_investment_info(investment_id):
@@ -571,10 +685,16 @@ def cmd_vol(args):
 
 def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_USD,
              peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE, min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
-             with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
-    """Core of `scan`, factored out so `recommend` can reuse it without going through argparse.
-    Returns (results, flagged) sorted by net_apy descending; raises on an unrecoverable baw
-    error (e.g. not signed in) -- callers decide how to present that."""
+             block_unknown_v4_hooks=True, with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
+    """Core of `scan`, factored out so `recommend` and `rebalance_check`'s market-comparison
+    side share one evaluation path instead of drifting apart (see evaluate_pool). Returns
+    (results, flagged, unscoreable) sorted by net_apy descending; raises on an unrecoverable
+    baw error (e.g. not signed in) -- callers decide how to present that. `unscoreable` lists
+    (pool_name, reason) for candidates that were never scored at all (data fetch failed, no
+    confirmed bStock, no usable kline overlap) -- distinct from `flagged`, which is pools that
+    *were* scored but failed the risk/plausibility screen. Never silently drop one into the
+    other: a user needs to tell "we couldn't evaluate this" apart from "we evaluated it and
+    it's unsafe/implausible"."""
     log("fetching tokenized-stock list...")
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
@@ -617,48 +737,65 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             except Exception:
                 pass
 
-    resolved = []  # (pool, info, stock) for candidates whose assetTokenList confirms a bStock
-    unique_stock_keys = set()
+    resolved = []  # (pool, info, stock, quote_addr, pair_mode) for confirmed-bStock candidates
+    unscoreable = []  # (pool_name, reason) -- surfaced, never silently dropped (see run_scan docstring)
+    kline_keys = set()
     for pool in candidates:
         info = info_by_pool.get(pool["investmentId"])
         if info is None:
+            unscoreable.append((pool.get("investmentName"), "investment-info fetch failed"))
             continue
-        chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
-        asset_list = info.get("assetTokenList") or []
-        stock = next(
-            (stock_index[(chain_id, a["tokenAddress"].lower())]
-             for a in asset_list if (chain_id, a["tokenAddress"].lower()) in stock_index),
-            None,
-        )
+        stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote(pool, info, stock_index)
         if stock is None:
             # name-matching was only ever a pre-filter guess (see the widened matcher above);
             # if the authoritative on-chain assetTokenList doesn't confirm a bStock in this
             # pool, trusting the name guess anyway risks attributing volatility/apy data to
             # the wrong token entirely. Skip rather than silently mis-score the pool.
+            unscoreable.append((pool.get("investmentName"), "assetTokenList did not confirm a bStock"))
             continue
-        resolved.append((pool, info, stock))
-        unique_stock_keys.add((stock["chainId"], stock["contractAddress"]))
+        if pair_mode == "unknown":
+            unscoreable.append((pool.get("investmentName"), "could not identify the paired (quote) token"))
+            continue
+        resolved.append((pool, info, stock, chain_id, quote_addr, pair_mode))
+        kline_keys.add((stock["chainId"], stock["contractAddress"]))
+        if pair_mode == "non_stablecoin":
+            kline_keys.add((chain_id, quote_addr))
 
     # Klines are plain HTTP (no subprocess spawn), but still worth fetching concurrently
     # for the same reason -- network round-trip latency, not local CPU, dominates.
-    vol_cache = {}
+    kline_cache = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as kline_executor:
         future_to_key = {
             kline_executor.submit(fetch_klines, chain_id, addr, limit=91): (chain_id, addr)
-            for chain_id, addr in unique_stock_keys
+            for chain_id, addr in kline_keys
         }
         for future in concurrent.futures.as_completed(future_to_key):
             key = future_to_key[future]
             try:
-                vol_cache[key] = annualized_volatility(future.result())
+                kline_cache[key] = future.result()
             except Exception:
-                vol_cache[key] = None
+                kline_cache[key] = None
 
     prepared = []
-    for pool, info, stock in resolved:
-        key = (stock["chainId"], stock["contractAddress"])
-        sigma = vol_cache.get(key)
+    for pool, info, stock, chain_id, quote_addr, pair_mode in resolved:
+        stock_key = (stock["chainId"], stock["contractAddress"])
+        stock_klines = kline_cache.get(stock_key)
+        if pair_mode == "stablecoin":
+            # quote is a stablecoin -- its own volatility is ~0, so IL is driven almost
+            # entirely by the bStock's own volatility (see README "The idea").
+            sigma = annualized_volatility(stock_klines) if stock_klines else None
+        else:
+            # non-stablecoin quote (e.g. bStock/BNB): IL depends on the *relative* price move
+            # between the two pooled assets, not the bStock's volatility alone. Using the
+            # bStock-only volatility here would silently understate risk whenever the quote
+            # asset moves too -- this was a real bug, not a simplification: NVDAB-BNB,
+            # BNB-SPCXB, HOODB-BNB etc. were being scored as if BNB were a stablecoin.
+            quote_klines = kline_cache.get((chain_id, quote_addr))
+            sigma = relative_annualized_volatility(stock_klines, quote_klines) if stock_klines and quote_klines else None
         if sigma is None or sigma <= 0:
+            reason = "insufficient/no overlapping kline history" if pair_mode == "non_stablecoin" \
+                else "insufficient kline history"
+            unscoreable.append((pool.get("investmentName"), f"could not compute volatility ({reason})"))
             continue
 
         # `investment-list`'s `apy` is null/0 for most concentrated (V3) LP pools;
@@ -670,7 +807,8 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         else:
             apy = float(pool.get("apy") or 0)
 
-        prepared.append({"pool": pool, "info": info, "stock": stock, "sigma": sigma, "apy": apy})
+        prepared.append({"pool": pool, "info": info, "stock": stock, "sigma": sigma, "apy": apy,
+                          "pair_mode": pair_mode})
 
     # Pass 2: apply the risk/plausibility screen with full peer context, then score the survivors.
     # Keyed by investmentId (not just apy value) so a pool excludes only itself as a "peer" --
@@ -687,15 +825,17 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
         security_score = fetch_protocol_security_score(protocol_id, security_score_cache) if protocol_id else None
         peer_apys = [a for inv_id, a in entries_by_ticker.get(stock["ticker"], []) if inv_id != pool["investmentId"]]
-        flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=security_score,
-                                 max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
-                                 peer_outlier_multiple=peer_outlier_multiple,
-                                 min_security_score=min_security_score)
-        if flags:
-            flagged.append((pool.get("investmentName"), pool.get("protocolName"), flags))
+        evaluation = evaluate_pool(pool, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
+                                    max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
+                                    peer_outlier_multiple=peer_outlier_multiple,
+                                    min_security_score=min_security_score,
+                                    block_unknown_v4_hooks=block_unknown_v4_hooks)
+        if evaluation["flags"]:
+            flagged.append({"investmentId": pool.get("investmentId"), "pool": pool.get("investmentName"),
+                             "protocol": pool.get("protocolName"), "flags": evaluation["flags"]})
             continue
 
-        scored = risk_adjusted_apy(apy, sigma)
+        scored = evaluation["scored"]
         result = {
             "protocol": pool.get("protocolName"),
             "pool": pool.get("investmentName"),
@@ -703,6 +843,7 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             "stock_ticker": stock["ticker"],
             "tvl": float(pool.get("tvl") or 0),
             "grade": richness_grade(scored["vol_ratio"]),
+            "pair_mode": p["pair_mode"],
             **scored,
         }
         if with_range:
@@ -712,20 +853,44 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         results.append(result)
 
     results.sort(key=lambda r: r["net_apy"], reverse=True)
-    return results, flagged
+    unscoreable_dicts = [{"pool": name, "reason": reason} for name, reason in unscoreable]
+    return results, flagged, unscoreable_dicts
 
 
 def cmd_scan(args):
+    started = time.time()
+    log = (lambda msg: None) if args.json else (lambda msg: print(msg, file=sys.stderr))
     try:
-        results, flagged = run_scan(
+        results, flagged, unscoreable = run_scan(
             max_pages=args.max_pages, max_fee_rate=args.max_fee_rate, min_tvl=args.min_tvl,
             peer_outlier_multiple=args.peer_outlier_multiple, min_security_score=args.min_security_score,
-            with_range=args.with_range,
+            block_unknown_v4_hooks=not args.allow_v4, with_range=args.with_range, log=log,
         )
     except Exception as e:
-        print(f"could not fetch LP pools: {e}", file=sys.stderr)
-        print("run `baw auth signin` / `baw auth verify` first, then re-run scan.", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"error": str(e), "hint": "run `baw auth signin` / `baw auth verify`"}, indent=2))
+        else:
+            print(f"could not fetch LP pools: {e}", file=sys.stderr)
+            print("run `baw auth signin` / `baw auth verify` first, then re-run scan.", file=sys.stderr)
         sys.exit(1)
+
+    capital_note = None
+    if args.capital and results:
+        top = results[0]
+        capital_note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
+
+    if args.json:
+        # Pure JSON on stdout -- nothing else -- so a scheduler/pipeline can parse it directly.
+        # Diagnostics (fetch progress, etc.) went to stderr above via `log`.
+        print(json.dumps({
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.time() - started, 1),
+            "results": results[: args.top],
+            "flagged": flagged,
+            "unscoreable": unscoreable,
+            "capital_note": capital_note,
+        }, indent=2))
+        return
 
     if args.with_range:
         print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'grade':>7}"
@@ -733,41 +898,48 @@ def cmd_scan(args):
         for r in results[: args.top]:
             b = r["best_range"]
             width = f"{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full"
+            tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['grade']:>7}"
                   f"{width:>10}{b['net_apy']*100:>10.2f}%{b['confidence']:>12}"
-                  f"{r['tvl']:>14,.0f}")
+                  f"{r['tvl']:>14,.0f}{tag}")
         print("\n(grade = Richness Score tier, vol_ratio bucketed Rich/Fair/Cheap; "
               "confidence = probability of the recommended range staying active a year, "
-              "bucketed High/Moderate/Low. Full numbers: --json.)")
+              "bucketed High/Moderate/Low. [non-stablecoin pair] = vol is the *relative* "
+              "vol between the two pooled assets, not the bStock alone -- see README. "
+              "Full numbers: --json.)")
     else:
         print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}")
         for r in results[: args.top]:
+            tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
                   f"{r['net_apy']*100:>9.2f}%{r['grade']:>7}"
-                  f"{r['tvl']:>14,.0f}")
+                  f"{r['tvl']:>14,.0f}{tag}")
         print("\n(grade = Richness Score tier -- realized vol vs. this pool's breakeven vol, "
-              "bucketed Rich/Fair/Cheap. Full numbers: --json.)")
+              "bucketed Rich/Fair/Cheap. [non-stablecoin pair] = vol is the *relative* vol "
+              "between the two pooled assets, not the bStock alone -- see README. Full numbers: --json.)")
 
-    if args.capital and results:
+    if capital_note:
         top = results[0]
-        note = position_sizing_note(args.capital, top["tvl"], top["net_apy"])
         print(f"\nAt ${args.capital:,.0f} into the top pick ({top['pool']}): "
-              f"~${note['dollar_return']:,.0f}/yr at the current rate, "
-              f"~{note['share_pct']*100:.1f}% of its TVL.")
-        if note["warning"]:
-            print(f"WARNING: {note['warning']}")
+              f"~${capital_note['dollar_return']:,.0f}/yr at the current rate, "
+              f"~{capital_note['share_pct']*100:.1f}% of its TVL.")
+        if capital_note["warning"]:
+            print(f"WARNING: {capital_note['warning']}")
 
     if flagged:
         print(f"\n{len(flagged)} pool(s) excluded from ranking -- pre-deposit screen flagged:")
-        for name, protocol, flags in flagged:
-            print(f"  {name} ({protocol}):")
-            for f in flags:
-                print(f"    - {f}")
+        for f in flagged:
+            print(f"  {f['pool']} ({f['protocol']}):")
+            for reason in f["flags"]:
+                print(f"    - {reason}")
 
-    if args.json:
-        print(json.dumps(results[: args.top], indent=2))
+    if unscoreable:
+        print(f"\n{len(unscoreable)} pool(s) could not be evaluated at all (not the same as "
+              f"'flagged' -- these were never scored, safe or not):")
+        for u in unscoreable:
+            print(f"  {u['pool']}: {u['reason']}")
 
 
 def cmd_range(args):
@@ -779,7 +951,7 @@ def cmd_range(args):
             print("check the investmentId is correct, or run `baw auth signin` / `baw auth verify` "
                   "if the session has expired.", file=sys.stderr)
             sys.exit(1)
-        flags = pool_risk_flags({}, info)
+        flags = pool_risk_flags({}, info, block_unknown_v4_hooks=not args.allow_v4)
         if flags:
             print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}) failed the pre-deposit screen:", file=sys.stderr)
             for f in flags:
@@ -787,18 +959,18 @@ def cmd_range(args):
             print("Proceeding anyway since an investmentId was given explicitly, but treat every "
                   "number below as unreliable -- do not recommend this pool.\n", file=sys.stderr)
         apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
-        asset_list = info.get("assetTokenList") or []
-        chain_id = info.get("binanceChainId")
         stock_tokens = fetch_stock_tokens()
         stock_index = build_stock_index(stock_tokens)
-        stock = next((stock_index[(chain_id, a["tokenAddress"].lower())]
-                      for a in asset_list if (chain_id, a["tokenAddress"].lower()) in stock_index), None)
+        stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
         if not stock:
             print("could not identify a tokenized-stock token in this pool's assetTokenList", file=sys.stderr)
             sys.exit(1)
-        klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
-        sigma = annualized_volatility(klines)
-        label = f"{info['investmentName']} ({stock['ticker']})"
+        if pair_mode == "unknown":
+            print("could not identify the pool's paired (quote) token -- cannot compute IL, aborting.", file=sys.stderr)
+            sys.exit(1)
+        sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode)
+        pair_note = "" if pair_mode == "stablecoin" else " -- non-stablecoin pair, vol is relative to the quote asset"
+        label = f"{info['investmentName']} ({stock['ticker']}){pair_note}"
         pool_tvl = float(info.get("tvl") or 0)
     else:
         if args.apy is None or args.ticker is None:
@@ -813,7 +985,7 @@ def cmd_range(args):
         klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
         sigma = annualized_volatility(klines)
         apy = args.apy
-        label = f"{stock['symbol']} @ {apy*100:.2f}% pool APY"
+        label = f"{stock['symbol']} @ {apy*100:.2f}% pool APY (assumes a stablecoin-quoted pair)"
         pool_tvl = None  # no live pool -- no TVL to size a position against
 
     if sigma is None:
@@ -831,6 +1003,15 @@ def cmd_range(args):
         print("WARNING: every candidate range nets <=0% after estimated IL -- this pool's fee "
               "income does not currently cover the token's volatility risk. 'recommended' below "
               "is the least-bad option, not a genuine opportunity.\n", file=sys.stderr)
+
+    if best["pa"] is not None:  # a synthetic full-range row has no [pa,pb] to stress-test
+        print("Scenario check on the recommended range (same [pa,pb], vol scaled -- "
+              "sigma is a backward-looking estimate, this shows how much that matters):")
+        for label_s, mult in [("Neutral (1x vol)", 1.0), ("Elevated (1.5x vol)", 1.5), ("Stress (2x vol)", 2.0)]:
+            stressed = range_metrics(apy, sigma * mult, best["pa"], best["pb"])
+            print(f"  {label_s:<22} net_apy {stressed['net_apy']*100:>8.2f}%   "
+                  f"confidence {confidence_grade(stressed['p_active'])}")
+        print()
     if args.side == "straddle":
         print(f"{'range':>10}{'concentration':>14}{'confidence':>12}{'eff.apy':>10}{'net_apy':>10}")
         for r in rows:
@@ -869,28 +1050,59 @@ def cmd_range(args):
                 print(f"WARNING: {note['warning']}")
 
 
+def passes_trade_gate(result):
+    """Hard gate for calling something a "Top pick": positive net_apy AND vol_ratio < 1
+    (i.e. not graded Cheap). A pool can clear the pre-deposit safety screen (be in `results`
+    at all) and still not be worth entering -- `results` answers "is this pool safe and
+    plausible", this answers "is it actually worth doing". Before this existed, `recommend`
+    would print a "Top pick" even when every candidate netted negative or graded Cheap,
+    which reads as an endorsement it didn't mean to make."""
+    return result["net_apy"] > 0 and result["vol_ratio"] is not None and result["vol_ratio"] < 1
+
+
 def cmd_recommend(args):
     """Single entry point: one verdict instead of deciding which of scan/range/positions to
     run. Ties together the market screen, the top pick's range recommendation, and (if any
     are held) a one-line check on existing bStock LP positions against that market."""
     try:
-        results, flagged = run_scan(max_pages=args.max_pages, with_range=True, log=lambda msg: None)
+        results, flagged, unscoreable = run_scan(max_pages=args.max_pages, block_unknown_v4_hooks=not args.allow_v4,
+                                                  with_range=True, log=lambda msg: None)
     except Exception as e:
         print(f"could not fetch LP pools: {e}", file=sys.stderr)
         print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
         sys.exit(1)
 
     if not results:
-        print("no bStock LP pools passed the pre-deposit screen right now.")
+        print("NO_TRADE -- no bStock LP pools passed the pre-deposit screen right now.")
         if flagged:
             print(f"({len(flagged)} pool(s) were excluded -- run `scan --with-range` for details.)")
+        if unscoreable:
+            print(f"({len(unscoreable)} pool(s) could not even be evaluated -- data/coverage issue, not a safety verdict.)")
         return
 
-    top = results[0]
+    tradeable = [r for r in results if passes_trade_gate(r)]
+    if not tradeable:
+        best = results[0]
+        reasons = []
+        if best["net_apy"] <= 0:
+            reasons.append(f"best candidate ({best['pool']}) nets {best['net_apy']*100:.1f}% after IL -- negative")
+        if best["vol_ratio"] is None or best["vol_ratio"] >= 1:
+            vr_str = f"{best['vol_ratio']:.2f}" if best["vol_ratio"] is not None else "n/a"
+            reasons.append(f"best candidate grades {best['grade']} (vol_ratio {vr_str}) -- "
+                            f"fee income likely doesn't cover realized risk")
+        print("NO_TRADE -- nothing currently clears the bar (positive net APY and vol_ratio < 1).")
+        for r in reasons:
+            print(f"  - {r}")
+        print(f"\nClosest candidate for reference: {best['pool']} ({best['stock_ticker']}), "
+              f"{best['grade']}, {best['net_apy']*100:.1f}% net APY. Not a recommendation.")
+        return
+
+    top = tradeable[0]
     b = top["best_range"]
     width = f"+/-{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full range"
+    pair_note = "" if top["pair_mode"] == "stablecoin" else " (non-stablecoin pair -- vol is relative to the quote asset, see README)"
     print(f"Top pick: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
-          f"{width} range at {b['confidence']} confidence, {b['net_apy']*100:.1f}% net APY.\n")
+          f"{width} range at {b['confidence']} confidence, {b['net_apy']*100:.1f}% net APY.{pair_note}\n")
 
     print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}")
     for r in results[:3]:
@@ -923,20 +1135,34 @@ def cmd_recommend(args):
     if flagged:
         print(f"\n({len(flagged)} pool(s) excluded by the pre-deposit screen -- "
               f"run `scan --with-range` for what and why.)")
+    if unscoreable:
+        print(f"({len(unscoreable)} pool(s) could not be evaluated at all -- data/coverage issue, not a safety verdict.)")
 
 
 def cmd_positions(args):
     try:
         data = fetch_positions(refresh=args.refresh)
     except Exception as e:
-        print(f"could not fetch positions: {e}", file=sys.stderr)
-        print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"could not fetch positions: {e}", file=sys.stderr)
+            print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
         sys.exit(1)
     total = float(data.get("deFiTotalValue") or 0)
-    print(f"total DeFi value: ${total:,.2f}\n")
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
     hits = lp_positions_on_stock_tokens(data, stock_index)
+
+    if args.json:
+        print(json.dumps({
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "total_defi_value_usd": total,
+            "positions": hits,
+        }, indent=2, default=str))
+        return
+
+    print(f"total DeFi value: ${total:,.2f}\n")
     if not hits:
         print("no LP positions on tokenized-stock pairs found.")
         return
@@ -944,81 +1170,93 @@ def cmd_positions(args):
         supply_str = ", ".join(f"{t['tokenSymbol']} {t.get('tokenAmount', '?')} (${float(t.get('tokenValue') or 0):,.2f})"
                                 for t in h["supply"])
         print(f"{h['protocolName']} | {h['stock']['ticker']} | nftId={h['nftId']} | {supply_str}")
-    if args.json:
-        print(json.dumps(hits, indent=2, default=str))
 
 
 REBALANCE_ATTENTION_GAP = 1.5  # flag "needs attention" if held vol_ratio is >1.5x the best market alternative
 
 
 def cmd_rebalance_check(args):
-    print("reading current positions...", file=sys.stderr)
+    started = time.time()
+    log = (lambda msg: None) if args.json else (lambda msg: print(msg, file=sys.stderr))
+    log("reading current positions...")
     try:
         data = fetch_positions()
     except Exception as e:
-        print(f"could not fetch positions: {e}", file=sys.stderr)
-        print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"could not fetch positions: {e}", file=sys.stderr)
+            print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
         sys.exit(1)
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
     held = lp_positions_on_stock_tokens(data, stock_index)
     if not held:
-        print("no LP positions on tokenized-stock pairs to check.")
+        payload = {"as_of": datetime.now(timezone.utc).isoformat(), "positions": [], "any_needs_attention": False}
         if args.json:
-            print(json.dumps({"positions": [], "any_needs_attention": False}, indent=2))
+            print(json.dumps(payload, indent=2))
+        else:
+            print("no LP positions on tokenized-stock pairs to check.")
         return
 
-    print("scanning current market for comparison...", file=sys.stderr)
+    # Same evaluation path as `scan` (run_scan -> evaluate_pool), not a separate stripped-down
+    # check -- before this, rebalance-check's own market-comparison loop skipped peer_apys and
+    # protocol_security_score entirely, so a pool `scan` would flag (or now, an unknown-hook V4
+    # pool) could still show up here as a "better" rebalance target. One evaluation path means
+    # that can't happen by construction.
+    log("scanning current market for comparison (shared evaluation path with `scan`)...")
     try:
-        market = fetch_lp_investments()
+        market_results, market_flagged, _ = run_scan(max_pages=args.max_pages,
+                                                       block_unknown_v4_hooks=not args.allow_v4,
+                                                       with_range=False, log=lambda msg: None)
     except Exception as e:
-        print(f"could not fetch market pools: {e}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"could not fetch market pools: {e}", file=sys.stderr)
         sys.exit(1)
-    market_by_id = {m["investmentId"]: m for m in market}
 
-    print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
+    market_by_id = {r["investmentId"]: r for r in market_results}
+    flagged_by_id = {f["investmentId"]: f for f in market_flagged}
+    best_ratio_by_ticker = {}
+    for r in market_results:
+        t = r["stock_ticker"]
+        if r["vol_ratio"] is not None and (t not in best_ratio_by_ticker or r["vol_ratio"] < best_ratio_by_ticker[t]):
+            best_ratio_by_ticker[t] = r["vol_ratio"]
+
+    if not args.json:
+        print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
     rows = []
     for h in held:
         inv_ids = h["investmentIds"] or []
-        held_ratio = None
-        held_flags = []
-        for inv_id in inv_ids:
-            m = market_by_id.get(inv_id)
-            if not m:
-                continue
-            try:
-                info = fetch_investment_info(inv_id)
-            except Exception:
-                continue
-            held_flags = pool_risk_flags({}, info)
-            for f in held_flags:
-                print(f"  WARNING: your held {h['protocolName']} position itself: {f}")
-            apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
-            klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
-            sigma = annualized_volatility(klines)
-            if sigma:
-                held_ratio = vol_richness_ratio(sigma, apy)
-            break
+        held_investment_id = inv_ids[0] if inv_ids else None
+        held_ratio, held_flags = None, []
 
-        candidates = []
-        for m in market:
-            if m.get("investmentName", "").upper().find(h["stock"]["ticker"].upper()) == -1:
-                continue
+        if held_investment_id and held_investment_id in market_by_id:
+            held_ratio = market_by_id[held_investment_id]["vol_ratio"]
+        elif held_investment_id and held_investment_id in flagged_by_id:
+            held_flags = flagged_by_id[held_investment_id]["flags"]
+        elif held_investment_id:
+            # Held position wasn't in the scanned market set at all (e.g. ranked outside the
+            # fetched pages) -- evaluate it directly via the same evaluate_pool() path rather
+            # than silently skip it.
             try:
-                info = fetch_investment_info(m["investmentId"])
+                info = fetch_investment_info(held_investment_id)
+                stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, stock_index)
+                sigma = resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode) if stock else None
+                apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
+                if sigma and sigma > 0:
+                    evaluation = evaluate_pool({}, info, sigma, apy, block_unknown_v4_hooks=not args.allow_v4)
+                    held_flags = evaluation["flags"]
+                    if not held_flags:
+                        held_ratio = evaluation["scored"]["vol_ratio"]
             except Exception:
-                continue
-            if pool_risk_flags(m, info):
-                continue
-            apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
-            klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
-            sigma = annualized_volatility(klines)
-            if sigma and sigma > 0:
-                r = vol_richness_ratio(sigma, apy)
-                if r is not None:
-                    candidates.append(r)
-            time.sleep(0.1)
-        best_market_ratio = min(candidates) if candidates else None
+                pass
+
+        for f in held_flags:
+            log(f"  WARNING: your held {h['protocolName']} position itself: {f}")
+
+        best_market_ratio = best_ratio_by_ticker.get(h["stock"]["ticker"])
 
         # "needs attention": the held pool itself is flagged, or the market has a meaningfully
         # richer alternative (>1.5x better vol_ratio) for the same ticker -- a bar deliberately
@@ -1027,9 +1265,10 @@ def cmd_rebalance_check(args):
             held_ratio is not None and best_market_ratio is not None and best_market_ratio > 0
             and held_ratio > best_market_ratio * REBALANCE_ATTENTION_GAP
         )
-        label = f"{h['protocolName']} ({h['stock']['ticker']})"
-        print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}"
-              f"{'  <- needs attention' if needs_attention else ''}")
+        if not args.json:
+            label = f"{h['protocolName']} ({h['stock']['ticker']})"
+            print(f"{label:<28}{richness_grade(held_ratio):>14}{richness_grade(best_market_ratio):>20}"
+                  f"{'  <- needs attention' if needs_attention else ''}")
         rows.append({
             "protocol": h["protocolName"], "ticker": h["stock"]["ticker"],
             "held_vol_ratio": held_ratio, "held_grade": richness_grade(held_ratio),
@@ -1037,11 +1276,50 @@ def cmd_rebalance_check(args):
             "held_flags": held_flags, "needs_attention": needs_attention,
         })
 
-    print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
-          "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
-
     if args.json:
-        print(json.dumps({"positions": rows, "any_needs_attention": any(r["needs_attention"] for r in rows)}, indent=2))
+        print(json.dumps({
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.time() - started, 1),
+            "positions": rows,
+            "any_needs_attention": any(r["needs_attention"] for r in rows),
+        }, indent=2))
+    else:
+        print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
+              "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
+
+
+def _positive_int(s):
+    v = int(s)
+    if v <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {v}")
+    return v
+
+
+def _nonneg_float(s):
+    v = float(s)
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {v}")
+    return v
+
+
+def _apy_fraction(s):
+    """APY as a decimal fraction (0.30 = 30%). Fee APY can't be negative -- unlike net_apy
+    (which nets out estimated IL and legitimately can be negative), the raw fee rate itself
+    is bounded below by zero. Cap the top end at a generous but finite ceiling to catch a
+    stray extra zero (e.g. 300000%) rather than let it silently propagate."""
+    v = float(s)
+    if not (0 <= v <= 100):
+        raise argparse.ArgumentTypeError(f"must be a non-negative decimal fraction, 0-100 (0.30 = 30%%), got {v}")
+    return v
+
+
+def _offset_fraction(s):
+    """A price-ratio offset/width (e.g. --target-offset, --band-width). Must keep price
+    positive (> -1) and stay within a sane range -- not literally unbounded."""
+    v = float(s)
+    if not (-0.99 < v < 10):
+        raise argparse.ArgumentTypeError(f"must be between -0.99 and 10 (0.15 = 15%%), got {v}")
+    return v
 
 
 def main():
@@ -1056,27 +1334,30 @@ def main():
 
     p_vol = sub.add_parser("vol", help="compute annualized volatility + est. IL for one ticker")
     p_vol.add_argument("--ticker", required=True)
-    p_vol.add_argument("--days", type=int, default=30)
-    p_vol.add_argument("--apy", type=float, default=None, help="optional: also show breakeven vol at this pool APY (0.30 = 30%%)")
+    p_vol.add_argument("--days", type=_positive_int, default=30)
+    p_vol.add_argument("--apy", type=_apy_fraction, default=None, help="optional: also show breakeven vol at this pool APY (0.30 = 30%%)")
     p_vol.set_defaults(func=cmd_vol)
 
     p_scan = sub.add_parser("scan", help="rank stock-token LP pools by risk-adjusted (net of IL) APY")
-    p_scan.add_argument("--top", type=int, default=15)
+    p_scan.add_argument("--top", type=_positive_int, default=15)
     p_scan.add_argument("--json", action="store_true")
-    p_scan.add_argument("--capital", type=float, default=None,
+    p_scan.add_argument("--capital", type=_nonneg_float, default=None,
                          help="optional: intended deposit size in USD -- shows expected $ return and "
                               "a concentration warning if you'd dominate the top pick's TVL")
-    p_scan.add_argument("--max-pages", type=int, default=3,
+    p_scan.add_argument("--max-pages", type=_positive_int, default=3,
                          help="pages of LP pools to fetch (100/page, sorted by apy DESC); higher "
                               "reaches lower-apy pools a single page would miss, at the cost of more API calls")
-    p_scan.add_argument("--max-fee-rate", type=float, default=MAX_SANE_FEE_RATE,
+    p_scan.add_argument("--max-fee-rate", type=_nonneg_float, default=MAX_SANE_FEE_RATE,
                          help=f"pre-deposit screen: max sane feeRate per swap (default {MAX_SANE_FEE_RATE})")
-    p_scan.add_argument("--min-tvl", type=float, default=MIN_SANE_TVL_USD,
+    p_scan.add_argument("--min-tvl", type=_nonneg_float, default=MIN_SANE_TVL_USD,
                          help=f"pre-deposit screen: minimum pool TVL in USD (default {MIN_SANE_TVL_USD:.0f})")
-    p_scan.add_argument("--peer-outlier-multiple", type=float, default=PEER_APY_OUTLIER_MULTIPLE,
+    p_scan.add_argument("--peer-outlier-multiple", type=_nonneg_float, default=PEER_APY_OUTLIER_MULTIPLE,
                          help=f"pre-deposit screen: flag apy above this multiple of peer median (default {PEER_APY_OUTLIER_MULTIPLE})")
-    p_scan.add_argument("--min-security-score", type=float, default=MIN_PROTOCOL_SECURITY_SCORE,
+    p_scan.add_argument("--min-security-score", type=_nonneg_float, default=MIN_PROTOCOL_SECURITY_SCORE,
                          help=f"pre-deposit screen: minimum protocol securityScore, 0-100 (default {MIN_PROTOCOL_SECURITY_SCORE})")
+    p_scan.add_argument("--allow-v4", action="store_true",
+                         help="don't hard-block Uniswap V4 pools over unknown hook safety (see README) -- "
+                              "off by default, turn on only for an already-vetted pool or explicit override")
     p_scan.add_argument("--with-range", action="store_true",
                          help="also compute the recommended concentrated-liquidity range per pool")
     p_scan.set_defaults(func=cmd_scan)
@@ -1084,17 +1365,21 @@ def main():
     p_range = sub.add_parser("range", help="range-by-range IL/APY breakdown + recommended range for one pool")
     p_range.add_argument("--investmentId", dest="investment_id", help="pull live apy/ticker for this pool")
     p_range.add_argument("--ticker", help="alternative to --investmentId: stock ticker")
-    p_range.add_argument("--apy", type=float, help="alternative to --investmentId: pool APY as a decimal (0.30 = 30%%)")
+    p_range.add_argument("--apy", type=_apy_fraction, help="alternative to --investmentId: pool APY as a decimal (0.30 = 30%%)")
     p_range.add_argument("--side", choices=["straddle", "sell", "buy"], default="straddle",
                           help="straddle=symmetric market-making (default), sell/buy=single-sided limit-order-style range")
-    p_range.add_argument("--target-offset", type=float, default=None,
+    p_range.add_argument("--target-offset", type=_offset_fraction, default=None,
                           help="sell/buy only: exact offset from current price (0.15 = 15%%) to evaluate "
                                "in addition to the preset sweep -- for a specific target price, not just presets")
-    p_range.add_argument("--band-width", type=float, default=SIDED_BAND_WIDTH,
+    p_range.add_argument("--band-width", type=_offset_fraction, default=SIDED_BAND_WIDTH,
                           help=f"sell/buy only: width of the --target-offset band (default {SIDED_BAND_WIDTH})")
-    p_range.add_argument("--capital", type=float, default=None,
+    p_range.add_argument("--capital", type=_nonneg_float, default=None,
                           help="optional (--investmentId only): intended deposit size in USD -- shows "
                                "expected $ return and a concentration warning vs this pool's TVL")
+    p_range.add_argument("--allow-v4", action="store_true",
+                          help="don't warn-and-still-show Uniswap V4 pools over unknown hook safety differently -- "
+                               "the warning still prints either way for an explicit --investmentId; this only "
+                               "affects whether the flag is raised at all")
     p_range.set_defaults(func=cmd_range)
 
     p_positions = sub.add_parser("positions", help="show current LP positions on tokenized-stock pairs")
@@ -1107,15 +1392,21 @@ def main():
     p_rebalance.add_argument("--json", action="store_true",
                               help="machine-readable output with a needs_attention flag per position -- "
                                    "for wiring into a scheduled check, see README")
+    p_rebalance.add_argument("--max-pages", type=_positive_int, default=3,
+                              help="pages of the market to scan for comparison (default 3)")
+    p_rebalance.add_argument("--allow-v4", action="store_true",
+                              help="don't hard-block Uniswap V4 pools over unknown hook safety when comparing")
     p_rebalance.set_defaults(func=cmd_rebalance_check)
 
     p_recommend = sub.add_parser("recommend",
                                   help="single entry point: top pick + range + a check on any held positions, one verdict")
-    p_recommend.add_argument("--max-pages", type=int, default=1,
+    p_recommend.add_argument("--max-pages", type=_positive_int, default=1,
                               help="pages of LP pools to scan (default 1, for a fast verdict; "
                                    "use `scan --max-pages` directly for the thorough sweep)")
-    p_recommend.add_argument("--capital", type=float, default=None,
+    p_recommend.add_argument("--capital", type=_nonneg_float, default=None,
                               help="optional: intended deposit size in USD -- shows expected $ return and a concentration warning")
+    p_recommend.add_argument("--allow-v4", action="store_true",
+                              help="don't hard-block Uniswap V4 pools over unknown hook safety")
     p_recommend.set_defaults(func=cmd_recommend)
 
     args = parser.parse_args()

@@ -88,7 +88,36 @@ IL 都会被同一个 Uniswap V3 集中度倍数 `M = 1 / (1 - √(Pa/Pb))` 放�
 工具会对每一侧扫描一组候选区间/偏移量，在"一年内保持活跃的概率 ≥60%"的候
 选里推荐 `net_apy` 最高的那个——这个60%的门槛就是"安全且高APY"里"安全"的
 那一半；更窄的区间可能显示更高的 `net_apy` 数字，但 `p_active` 低到不能算
-"安全"。两个数字总是一起展示，绝不只给APY。
+"安全"。两个数字总是一起展示，绝不只给APY。`range` 还会对推荐区间做一个
+**情景压力测试**——用同一个 `[Pa, Pb]`，把估算的 `σ` 分别乘以1x/1.5x/2x
+（Neutral/Elevated/Stress）重新算一遍，因为 `σ` 本身就是回顾性的估计值；
+这样能看出这个建议到底有多依赖"波动率估计是对的"这个前提，而不是把一个数
+字当成确定的事实呈现出来。
+
+### 不是所有池子都是稳定币计价的
+
+`NVDAB-BNB`、`BNB-SPCXB`、`HOODB-BNB` 等池子是拿 bStock 和 BNB 配对，不是
+和稳定币配对。**这是一个真实的bug，不是文档里说明过的简化**：早期版本对所
+有池子都只用bStock自身的波动率算IL，等于悄悄把计价资产当成了完全不动的稳
+定币，即便它其实在动——这会低估每一个非稳定币配对池子的风险。现在
+`resolve_pool_stock_and_quote()` 会根据池子链上的 `assetTokenList` 判断配
+对类型，对于非稳定币计价的池子，`relative_annualized_volatility()` 会用两
+边资产按时间对齐的K线，计算 `log(P_stock / P_quote)` 的波动率——这种池子的
+IL取决于两个被质押资产之间的相对变动，不是任何单一一个资产自己的波动率。
+每条结果都带一个 `pair_mode`（`"stablecoin"` / `"non_stablecoin"`）；
+`scan`/`range` 会明确给非稳定币结果打标签（`[non-stablecoin pair]`），不
+会让它看起来和稳定币配对的结果一样。
+
+## 没有候选池子也可能意味着 NO_TRADE
+
+通过存款前筛查（见下文）只是回答了"这个池子安不安全、合不合理，值不值得
+考虑"——不代表"这就值得做"。`recommend` 现在会用 `passes_trade_gate()` 给
+"Top pick"设一道门槛：`net_apy` 必须为正，**并且** `vol_ratio < 1`（不能
+是Cheap档）。改之前，即便所有候选池子扣完IL都是负收益，或者评级都是
+Cheap，`recommend` 依然会打印一个"Top pick"——这读起来像是一种从没打算做
+出的背书。当没有任何候选能同时满足这两条门槛时，`recommend` 会打印一个明
+确的 `NO_TRADE` 结论，说明具体原因，并且只把最接近门槛的候选列出来作参考，
+明确标注"这不是推荐"。
 
 ## 存款前风险与合理性筛查
 
@@ -104,6 +133,24 @@ V3/V4 池子可能报出极不靠谱的 `apy` 数字，而且没有哪一个单�
 | apy 超过同ticker中位数的5倍 | 收益是真的吗？ | **通用情形**——不管是什么机制造成的，已知的还是未知的 |
 | `investable = false` | 安全吗？ | 已下架，无法新存款 |
 | 协议 `securityScore` < 50 | 安全吗？ | 明显不靠谱的协议（较弱的下限，见下文） |
+| 协议名包含"V4" | 安全吗？ | **默认硬性拦截**——见下方"Uniswap V4 池子默认硬拦截" |
+
+**和 `flagged` 是两回事：`unscoreable`。** 有些池子根本没被评估过——
+`investment-info` 抓取失败、`assetTokenList` 确认不了是bStock、或者没有
+足够的（重叠）K线历史。`scan`/`recommend` 会把这些单独列出来，不跟
+`flagged` 混在一起——"我们没法评估这个"和"我们评估了、它不安全/不合理"是
+两个不同的结论，把两者混成一次静默丢弃（早期版本就是这么做的），会让人没
+法区分"这个池子有风险"和"我们压根没数据"。
+
+### Uniswap V4 池子默认硬拦截
+
+V4 池子可以挂任意自定义hook合约——审计过的核心AMM之外的逻辑。这个工具没
+有API能拿到池子的hook地址、权限或审计状态，协议级别的 `securityScore` 也
+看不到这个（V3和V4分数完全一样，见下方局限说明）。与其把这个留成一条注意
+事项，现在默认把**每一个**V4池子都排除出排名，无条件——不只是那些已经有
+明显症状（比如极端feeRate）的。要覆盖这个行为，明确要求或者是已经审查过
+的池子，可以传 `--allow-v4`；更深层的修复（真正的hook审计，等有这个数据
+之后）还在Roadmap里。
 
 促成这个机制的案例：一个 Uniswap V4 的 QQQB-USDC 池子显示
 `apy=1,658.77%`，而同一交易对的等价 V3 池子只有 77.86%——追查发现是
@@ -160,25 +207,33 @@ python riskscreen.py stocks --limit 20 --type 1
 python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- 排名/建议（需要已登录的 `baw` 会话）---
-python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000]
+python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # 不查真实池子也行
 
 # --- 持仓 + 再平衡（需要已登录的 `baw` 会话）---
 python riskscreen.py positions [--refresh] [--json]
-python riskscreen.py rebalance-check [--json]   # --json 用于定时监控，见 Roadmap
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]   # --json 用于定时监控
 ```
 
 `recommend`、`scan`、`range --investmentId`、`positions`、`rebalance-check`
 都会调用 `baw`（`defi investment-list` / `investment-info` / `defi position`
 / `defi protocol-info`），所以需要一个已登录的 Agentic Wallet 会话（`baw
 auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
-直接打公开的 Binance Web3 接口，不需要鉴权。
+直接打公开的 Binance Web3 接口，不需要鉴权。`--allow-v4` 用来覆盖默认的V4
+硬拦截（见上文"Uniswap V4 池子默认硬拦截"）——只在明确要求时才传这个。
 
-**测试**：`pytest test_riskscreen.py` 跑53个单元测试，覆盖所有纯数学函数
-（不需要网络/baw）。每个命令的真实数据冒烟测试记录在下面的"运行状态"里。
+**`--json`（在 `scan`/`positions`/`rebalance-check` 上）是 stdout 上纯粹
+的JSON**——所有进度/诊断信息都走 stderr，每个返回值都带 `as_of`（UTC时间
+戳）,`scan` 还额外带 `elapsed_seconds`、`flagged`、`unscoreable`。可以直接
+喂给 `jq` 或调度器，不用先把表格文字剥掉。
+
+**测试**：`pip install -r requirements.txt && pytest test_riskscreen.py`
+跑83个单元测试，覆盖所有纯数学/纯逻辑函数（不需要网络/baw）——CI
+（`.github/workflows/test.yml`）在每次push时会跑这个加上 `py_compile`。每
+个命令的真实数据冒烟测试记录在下面的"运行状态"里。
 
 **执行环节故意不在这个脚本的范围内。** `rebalance-check` 只打印报告，不会
 挪动任何东西。要对某个建议采取行动，走 `binance-agentic-wallet` 的 `defi
@@ -257,14 +312,20 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
 
 ### 还没做的
 
-- **Uniswap V4 hook 安全审计。** V4 池子可以挂任意自定义hook合约——这是审
-  计过的核心AMM之外的逻辑，也是恶意或写得差的池子（吸手续费的hook、锁死提
-  现的hook等）的真实风险点。存款前筛查里的 `securityScore` 检查是协议级别
-  的，明确覆盖不到这个（Uniswap V3和V4分数完全一样）。缺的是池子/hook级别
-  的检查：这个池子有没有挂hook，如果有，它的审计状态、权限、是否命中已知
-  恶意hook名单——跟这个项目已经对波动率风险采取的"不要直接推荐存款"这个谨
-  慎态度是一回事，只是往合约风险这一层再深挖一步。`query-token-audit` 已
-  经有针对代币的这种检查模式；池子层面的对应物还是空白。
+- **Uniswap V4 hook 安全审计。** 临时缓解措施已经上线（默认硬拦截所有V4
+  池子，见上文）——还缺的是能让这个拦截"选择性放开"而不是一刀切的真正审
+  计能力：某个具体池子有没有挂hook、它的审计状态、权限、是否命中已知恶意
+  hook名单——跟这个项目已经对波动率风险采取的"不要直接推荐存款"这个谨慎
+  态度是一回事，只是往合约风险这一层再深挖一步。`query-token-audit` 已经
+  有针对代币的这种检查模式；池子层面的对应物还是空白。在这之前，
+  `--allow-v4` 只是人工覆盖，不是替代品。
+- **历史校准/回测。** 这里每一个区间/情景数字都只是"此刻"的模型估计
+  （`--json` 输出里的 `as_of`）——没有一个被拿去跟后续实际发生的情况对照
+  过。一套纸面交易或历史回放机制（记录一个建议，N天后拿真实的池子/价格数
+  据回头验证）能验证或纠正模型的假设（扩散近似、把平台apy当满区间基准处
+  理、非稳定币配对的相对波动率模型）,而不是让这些假设一直停留在没验证过
+  的理论层面。这个比清单上其他项目的工作量都大得多——这一轮先标记出来，
+  没有动手做。
 - **Robinhood Chain 兼容性。** 已经有实锤，不是空想：
   [Fables](https://www.fables.fi) 已经在 Robinhood Chain 上线，交易代币化
   股票（NVDA/USDG、TSLA/USDG、AAPL/USDG、SPY/USDG……），背后有一个公开的
@@ -295,6 +356,43 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   `SKILL.md` 里的人工提醒；应该直接调用
   `binance-tokenized-securities-info` 的资产市场状态API，在财报/分红/拆股
   日期落在建议的时间窗口内时，自动放宽有效波动率估计或者直接标红这个池子。
+
+### 最近完成的（来自一次外部代码审查）
+
+一次针对代码库本身（不只是CLI表现）的只读外部审查，发现了一个真实的正确
+性bug和几个设计缺口。按审查建议的顺序修复：
+
+- **非稳定币配对的波动率（P0，真实bug，不是简化说明）。** `NVDAB-BNB`/
+  `BNB-SPCXB`/`HOODB-BNB` 这类池子之前只用bStock自身的波动率打分，等于悄
+  悄把BNB当成完全不动。现在通过 `resolve_pool_stock_and_quote()` +
+  `relative_annualized_volatility()` 正确计算——见上文"不是所有池子都是
+  稳定币计价的"。
+- **明确的 `NO_TRADE` 结论（P0）。** 当没有任何候选能通过
+  `passes_trade_gate()`（净收益为正、vol_ratio<1）时，`recommend` 不再打
+  印"Top pick"——见上文"没有候选池子也可能意味着NO_TRADE"。
+- **`range` 推荐区间的情景压力测试**——用估算σ的1x/1.5x/2x
+  （Neutral/Elevated/Stress）重新算，让建议对波动率估计的敏感度看得见，
+  而不是隐含在一个数字背后。（完整的历史回测/校准这一轮明确没做——见
+  Roadmap。）
+- **`--json` 纯JSON契约**（`scan`/`positions`/`rebalance-check`），带
+  `as_of`、`elapsed_seconds`、`flagged`、`unscoreable` 字段——之前
+  `--json` 会先打印人类可读的表格，调度器没法直接解析stdout。
+- **统一的评估路径。** `rebalance-check` 现在内部调用 `run_scan()`，不再
+  跑自己那套单独的（之前不一致——完全没传 `peer_apys`/
+  `protocol_security_score`）市场对比逻辑。`scan` 和 `rebalance-check` 现
+  在结构上不可能对同一个池子得出不同的安全结论。
+- **`unscoreable` 报告**——抓取失败、确认不了是bStock、或没有可用K线重叠
+  的池子，现在会单独报告，不再悄悄丢掉、跟"检查过没问题"混为一谈。
+- **Uniswap V4 默认硬拦截**（`--allow-v4` 可覆盖）——见上文"Uniswap V4
+  池子默认硬拦截"。
+- **CLI参数校验**——负APY、负的/退化的offset、`--max-pages <= 0` 等现在
+  在argparse层就会被拒绝（`_positive_int`/`_nonneg_float`/
+  `_apy_fraction`/`_offset_fraction`），不会传进模型内部。
+- **仓库基础设施**：`LICENSE`（MIT）、`requirements.txt`、GitHub Actions
+  CI流程（`.github/workflows/test.yml`，每次push跑 `py_compile` + pytest）
+  ——这些之前都没有。
+- **新增30个单元测试**（总共83个），覆盖相对波动率修复、V4拦截、
+  `evaluate_pool`、`passes_trade_gate`、CLI校验器。
 
 ### 最近完成的（来自一轮 PM/QA 审查）
 

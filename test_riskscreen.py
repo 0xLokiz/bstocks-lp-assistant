@@ -9,19 +9,30 @@ import math
 
 import pytest
 
+import argparse
+
 from riskscreen import (
     annualized_volatility,
     breakeven_volatility,
     concentration_multiplier,
     confidence_grade,
+    evaluate_pool,
     expected_il_fraction,
+    is_stablecoin,
     no_exit_probability,
+    passes_trade_gate,
     pool_risk_flags,
     range_metrics,
     recommend_range,
+    relative_annualized_volatility,
+    resolve_pool_stock_and_quote,
     richness_grade,
     vol_richness_ratio,
+    _apy_fraction,
     _il_at_price_ratio,
+    _nonneg_float,
+    _offset_fraction,
+    _positive_int,
     _single_barrier_touch_probability,
 )
 
@@ -296,6 +307,217 @@ def test_pool_risk_flags_peer_check_excludes_self_by_construction():
     peers_including_self = [0.5, 0.5, 0.5]
     flags = pool_risk_flags(pool, info, peer_apys=peers_including_self)
     assert flags == []  # median == apy, not an outlier either way
+
+
+# ---- is_stablecoin ----
+
+def test_is_stablecoin_matches_known_bsc_usdt():
+    assert is_stablecoin("56", "0x55d398326f99059fF775485246999027B3197955")  # mixed-case input
+    assert is_stablecoin("56", "0x55d398326f99059ff775485246999027b3197955")  # lowercase
+
+
+def test_is_stablecoin_false_for_bnb():
+    assert not is_stablecoin("56", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
+
+
+def test_is_stablecoin_false_for_unknown_chain():
+    assert not is_stablecoin("999", "0x55d398326f99059ff775485246999027b3197955")
+
+
+# ---- relative_annualized_volatility (the non-stablecoin-pair fix) ----
+
+def test_relative_volatility_zero_when_ratio_constant():
+    # stock and quote move in lockstep -> the ratio series is flat -> zero relative vol,
+    # even though each leg individually has nonzero volatility
+    stock = make_klines([100, 110, 121, 133.1, 146.41])
+    quote = make_klines([10, 11, 12.1, 13.31, 14.641])
+    sigma = relative_annualized_volatility(stock, quote)
+    assert sigma == pytest.approx(0.0, abs=1e-6)
+
+
+def test_relative_volatility_positive_when_ratio_varies():
+    stock = make_klines([100, 105, 98, 110, 95, 103])
+    quote = make_klines([10, 10, 10, 10, 10, 10])  # flat quote -> ratio vol == stock's own vol
+    rel_sigma = relative_annualized_volatility(stock, quote)
+    stock_sigma = annualized_volatility(stock)
+    assert rel_sigma == pytest.approx(stock_sigma, rel=1e-9)
+
+
+def test_relative_volatility_none_without_overlap():
+    stock = [[100 + i, "0", "0", "0", "1", "0", 0] for i in range(5)]  # times 100..104
+    quote = [[200 + i, "0", "0", "0", "1", "0", 0] for i in range(5)]  # times 200..204, no overlap
+    assert relative_annualized_volatility(stock, quote) is None
+
+
+def test_relative_volatility_uses_only_overlapping_times():
+    # quote has extra early candles the stock doesn't -- must not crash, must use the overlap
+    stock = make_klines([100, 110, 121, 133.1, 146.41])          # times 0-4
+    quote = [[i, "0", "0", "0", str(c), "0", i] for i, c in enumerate([5, 10, 11, 12.1, 13.31, 14.641])]  # times 0-5
+    sigma = relative_annualized_volatility(stock, quote)
+    assert sigma is not None and sigma >= 0
+
+
+# ---- resolve_pool_stock_and_quote ----
+
+STOCK_INDEX = {("56", "0xaaa"): {"ticker": "NVDA", "symbol": "NVDAB", "chainId": "56", "contractAddress": "0xaaa"}}
+
+
+def test_resolve_pool_stock_and_quote_stablecoin_pair():
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"},
+        {"tokenAddress": "0x55d398326f99059ff775485246999027b3197955", "tokenSymbol": "USDT"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock["ticker"] == "NVDA"
+    assert pair_mode == "stablecoin"
+
+
+def test_resolve_pool_stock_and_quote_non_stablecoin_pair():
+    # this is the exact NVDAB-BNB / BNB-SPCXB / HOODB-BNB case from the review
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"},
+        {"tokenAddress": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", "tokenSymbol": "BNB"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock["ticker"] == "NVDA"
+    assert pair_mode == "non_stablecoin"
+
+
+def test_resolve_pool_stock_and_quote_no_confirmed_bstock():
+    info = {"binanceChainId": "56", "assetTokenList": [
+        {"tokenAddress": "0xzzz", "tokenSymbol": "RANDOM"},
+        {"tokenAddress": "0x55d398326f99059ff775485246999027b3197955", "tokenSymbol": "USDT"},
+    ]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock is None
+    assert pair_mode == "unknown"
+
+
+def test_resolve_pool_stock_and_quote_no_second_token():
+    info = {"binanceChainId": "56", "assetTokenList": [{"tokenAddress": "0xaaa", "tokenSymbol": "NVDAB"}]}
+    stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote({}, info, STOCK_INDEX)
+    assert stock is not None
+    assert pair_mode == "unknown"
+
+
+# ---- pool_risk_flags: V4 hard block ----
+
+def test_pool_risk_flags_blocks_v4_by_default():
+    pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    flags = pool_risk_flags(pool, info)
+    assert any("V4" in f for f in flags)
+
+
+def test_pool_risk_flags_v4_block_is_case_insensitive_and_checks_info_too():
+    pool = {"tvl": "50000"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003", "protocolName": "uniswap v4"}
+    flags = pool_risk_flags(pool, info)
+    assert any("v4" in f.lower() for f in flags)
+
+
+def test_pool_risk_flags_v3_not_blocked():
+    pool = {"tvl": "50000", "protocolName": "Uniswap V3"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    assert pool_risk_flags(pool, info) == []
+
+
+def test_pool_risk_flags_v4_override_disables_block():
+    pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    flags = pool_risk_flags(pool, info, block_unknown_v4_hooks=False)
+    assert flags == []
+
+
+# ---- evaluate_pool ----
+
+def test_evaluate_pool_clean_returns_no_flags_and_scored_data():
+    pool = {"tvl": "50000", "protocolName": "PancakeSwap V3"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    result = evaluate_pool(pool, info, sigma=0.4, apy=0.5)
+    assert result["flags"] == []
+    assert result["scored"]["apy"] == 0.5
+    assert "vol_ratio" in result["scored"]
+
+
+def test_evaluate_pool_flagged_still_returns_scored_for_transparency():
+    pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    result = evaluate_pool(pool, info, sigma=0.4, apy=0.5)
+    assert result["flags"] != []
+    assert result["scored"]["apy"] == 0.5  # still computed, caller decides whether to show it
+
+
+# ---- passes_trade_gate (the NO_TRADE fix) ----
+
+def test_passes_trade_gate_true_for_rich_positive_net_apy():
+    result = {"net_apy": 0.5, "vol_ratio": 0.2}
+    assert passes_trade_gate(result)
+
+
+def test_passes_trade_gate_false_for_negative_net_apy():
+    result = {"net_apy": -0.01, "vol_ratio": 0.2}
+    assert not passes_trade_gate(result)
+
+
+def test_passes_trade_gate_false_for_cheap_grade():
+    result = {"net_apy": 0.1, "vol_ratio": 1.5}  # >= 1 -> Cheap
+    assert not passes_trade_gate(result)
+
+
+def test_passes_trade_gate_false_for_unknown_vol_ratio():
+    result = {"net_apy": 0.1, "vol_ratio": None}
+    assert not passes_trade_gate(result)
+
+
+# ---- CLI argument validators ----
+
+def test_positive_int_accepts_positive():
+    assert _positive_int("3") == 3
+
+
+def test_positive_int_rejects_zero_and_negative():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("-1")
+
+
+def test_nonneg_float_accepts_zero_and_positive():
+    assert _nonneg_float("0") == 0.0
+    assert _nonneg_float("5.5") == 5.5
+
+
+def test_nonneg_float_rejects_negative():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _nonneg_float("-0.01")
+
+
+def test_apy_fraction_rejects_negative():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _apy_fraction("-0.1")
+
+
+def test_apy_fraction_accepts_zero_and_reasonable_values():
+    assert _apy_fraction("0") == 0.0
+    assert _apy_fraction("0.3") == 0.3
+
+
+def test_apy_fraction_rejects_absurd_magnitude():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _apy_fraction("1000")
+
+
+def test_offset_fraction_rejects_price_crushing_offset():
+    with pytest.raises(argparse.ArgumentTypeError):
+        _offset_fraction("-1")  # would drive price to exactly zero
+    with pytest.raises(argparse.ArgumentTypeError):
+        _offset_fraction("-5")
+
+
+def test_offset_fraction_accepts_normal_range():
+    assert _offset_fraction("0.15") == 0.15
+    assert _offset_fraction("-0.5") == -0.5
 
 
 if __name__ == "__main__":

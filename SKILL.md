@@ -1,6 +1,6 @@
 ---
 name: bstocks-lp-assistant
-description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks) pools. Ranks pools by a breakeven-volatility "is this vol richly priced" score (not raw APY), recommends a concentrated-liquidity price range -- symmetric market-making, or a single-sided range used as a yield-enhanced limit buy/sell order at an exact target price -- sizes a position against pool TVL (concentration warning), and checks held LP positions against the current market, including a scheduled-monitoring mode. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, use an LP range to buy/sell at a target price, screen for risk-adjusted yield, size a deposit, review their current LP positions, or asks whether to rebalance -- or asks an open-ended "what should I do with my bStocks LPs" question (use `recommend`). Does not execute deposits/withdrawals itself -- see "Executing a recommendation" below.
+description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks) pools. Ranks pools by a breakeven-volatility "is this vol richly priced" score (not raw APY) -- correctly using relative volatility for non-stablecoin pairs like bStock/BNB, not just the bStock's own vol -- recommends a concentrated-liquidity price range at an exact target price, sizes a position against pool TVL, hard-blocks Uniswap V4 pools over unknown hook safety, and can return an explicit NO_TRADE verdict when nothing clears a positive-net-APY-and-not-Cheap bar. Checks held LP positions against the current market via the same evaluation path as ranking (never a separately-drifted check), including a scheduled-monitoring mode. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, use an LP range to buy/sell at a target price, screen for risk-adjusted yield, size a deposit, review their current LP positions, or asks whether to rebalance -- or asks an open-ended "what should I do with my bStocks LPs" question (use `recommend`). Does not execute deposits/withdrawals itself -- see "Executing a recommendation" below.
 ---
 
 # bStocks LP Assistant
@@ -46,6 +46,54 @@ providers on the same underlying tickers. `fetch_stock_tokens()` defaults to
 bStock-only; every command inherits that by default. If a user explicitly
 asks about Ondo/xStocks pools, that's out of this skill's scope — say so
 rather than silently mixing providers into a ranking.
+
+## Model scope: stablecoin vs. non-stablecoin pairs
+
+Not every bStock LP pool is quoted against a stablecoin — `NVDAB-BNB`,
+`BNB-SPCXB`, `HOODB-BNB` etc. pair against BNB. IL for a non-stablecoin pair
+depends on the *relative* price move between the two pooled assets, not the
+bStock's volatility alone. `resolve_pool_stock_and_quote()` classifies every
+pool's pair on its on-chain `assetTokenList`, and `relative_annualized_volatility()`
+computes `vol(log(P_stock/P_quote))` from aligned klines for the non-stablecoin
+case. Every result carries a `pair_mode` ("stablecoin"/"non_stablecoin") —
+**always surface it** when presenting a non-stablecoin pool (`scan`/`range`
+already print `[non-stablecoin pair]` / a label). Don't present a
+stablecoin-pair result and a non-stablecoin-pair result with the same
+confidence language — they're different models with different reliability,
+even when the printed grade looks the same.
+
+## NO_TRADE is a real, expected outcome
+
+`recommend` gates a "Top pick" behind `passes_trade_gate()`: positive
+`net_apy` **and** `vol_ratio < 1` (not graded Cheap). Passing the
+pre-deposit safety screen (being in `results` at all) answers "is this
+plausible and safe to consider" — the trade gate answers "is it actually
+worth doing." When nothing clears both bars, `recommend` prints `NO_TRADE`
+with the specific reason(s), not a downgraded "Top pick." **Treat `NO_TRADE`
+as a legitimate, informative answer, not a failure to relay to the user
+apologetically** — it's the model doing its job when the market genuinely
+doesn't offer a clean opportunity right now.
+
+## Uniswap V4 pools are hard-blocked by default
+
+`pool_risk_flags(..., block_unknown_v4_hooks=True)` (the default) excludes
+every Uniswap V4 pool from ranking, unconditionally — not just ones with an
+already-visible symptom like an extreme feeRate. Reason: V4 pools can carry
+an arbitrary custom hook, and this tool has no API access to a pool's hook
+address, permissions, or audit status; the protocol-level `securityScore`
+signal can't see it either (V3 and V4 score identically). `--allow-v4`
+disables this for an explicit user override or an already-vetted pool — only
+pass it through on a clear, explicit ask ("show me V4 pools anyway"), never
+by default just because nothing else qualified.
+
+## Never let scan and rebalance-check disagree
+
+`rebalance-check` calls `run_scan()` internally for its market comparison —
+the exact same evaluation path (`evaluate_pool()`, same thresholds, same V4
+block) that `scan` uses, not a separate stripped-down check. If you ever see
+`scan` and `rebalance-check` reach different safety conclusions about the
+same pool, that's a bug to report, not a discrepancy to paper over — the
+whole point of the shared path is that it can't happen by construction.
 
 ## When to use
 
@@ -193,22 +241,29 @@ python riskscreen.py stocks --limit 20 [--type 1|2|3]
 python riskscreen.py vol --ticker <TICKER> [--days 30] [--apy 0.30]
 
 # rank stock-token LP pools by vol_ratio / net APY (needs signed-in baw session)
-python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000]
+python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000] [--allow-v4]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000]
   [--peer-outlier-multiple 5] [--min-security-score 50]
 
 # range-by-range IL/APY breakdown + recommended range for one pool
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # without a live pool
 
 # current LP positions on tokenized-stock pairs (needs signed-in baw session)
 python riskscreen.py positions [--refresh] [--json]
 
-# compare held positions' vol_ratio against the current market
-# (report only — see "Executing a recommendation")
-python riskscreen.py rebalance-check [--json]
+# compare held positions' vol_ratio against the current market -- same evaluation
+# path as `scan` (report only — see "Executing a recommendation")
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]
 ```
+
+**`--json` on `scan`/`positions`/`rebalance-check` is pure JSON on stdout —
+nothing else.** Progress/diagnostic messages go to stderr, so a scheduler or
+pipeline consuming `--json` output never has to strip prose out of it. Every
+JSON payload carries `as_of` (an ISO-8601 UTC timestamp of when the data was
+pulled) — surface it if a user asks "how fresh is this," don't just say
+"current."
 
 **`recommend` is the default answer** to an open-ended "what should I do"
 question — it wraps `scan --with-range` (page 1 only, for speed) plus a
@@ -283,6 +338,14 @@ why; `range --investmentId` warns loudly but still shows numbers if a
 specific pool was requested explicitly by ID (say clearly the numbers are
 unreliable if so).
 
+**Distinct from this: `unscoreable`.** Some pools are never scored at all —
+`investment-info` fetch failed, `assetTokenList` didn't confirm a bStock, or
+there wasn't enough (overlapping) kline history to compute a volatility.
+`scan`/`recommend` report these separately from `flagged` and never conflate
+the two: "we couldn't evaluate this" (`unscoreable`) is a different claim
+from "we evaluated it and it's unsafe/implausible" (`flagged`) — don't tell
+a user a pool is "risky" when the honest answer is "we don't have data on it."
+
 Signals, current set:
 
 | Signal | Question | Catches |
@@ -292,6 +355,7 @@ Signals, current set:
 | apy > 5x peer median (same ticker) | is the yield real? | **the general case** — any mechanism producing an implausible apy, known or not |
 | `investable = false` | is it safe? | delisted product, no new deposits possible |
 | protocol `securityScore` < 50 | is it safe? | obviously disreputable protocols (weak floor — see limitation below) |
+| protocol name contains "V4" | is it safe? | **hard block by default** — unknown hook risk, see "Uniswap V4 pools are hard-blocked" above |
 
 The peer-outlier check is the important one to reason about like an
 assistant, not a rule-follower: it's what would have caught the QQQB-USDC

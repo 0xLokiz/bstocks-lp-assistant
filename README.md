@@ -105,7 +105,40 @@ the highest `net_apy` among those with **≥60% chance of being active over a
 year** — that 60% floor is the "safety" side of "safe and high APY"; a
 narrower range can show a higher `net_apy` number but at a `p_active` so low
 it's misleading to call it "safe". Both numbers are always shown together,
-never the APY alone.
+never the APY alone. `range` also prints a **scenario check** on the
+recommended range — the same `[Pa, Pb]` re-priced at 1x/1.5x/2x the
+estimated `σ` (Neutral/Elevated/Stress) — since `σ` is itself a
+backward-looking estimate; this shows how much the recommendation actually
+depends on that estimate being right, rather than presenting one number as
+if it were certain.
+
+### Not every pool is quoted against a stablecoin
+
+`NVDAB-BNB`, `BNB-SPCXB`, `HOODB-BNB`, and others pair a bStock against BNB,
+not a stablecoin. **This was a real bug, not a documented simplification**:
+earlier versions computed IL from the bStock's own volatility alone for
+every pool, silently treating the quote asset as flat even when it wasn't —
+understating risk for every non-stablecoin pair. `resolve_pool_stock_and_quote()`
+now classifies each pool's pair from its on-chain `assetTokenList`, and for a
+non-stablecoin quote, `relative_annualized_volatility()` computes the
+volatility of `log(P_stock / P_quote)` from time-aligned klines of *both*
+assets — IL for such a pool depends on the relative move between the two
+pooled assets, not either one alone. Every result carries a `pair_mode`
+(`"stablecoin"` / `"non_stablecoin"`); `scan`/`range` label non-stablecoin
+results explicitly (`[non-stablecoin pair]`) rather than let them look the
+same as a stablecoin-quoted result.
+
+## No candidate has to mean NO_TRADE
+
+Passing the pre-deposit screen (below) answers "is this pool safe and
+plausible to consider" — it doesn't answer "is it actually worth doing."
+`recommend` now gates its "Top pick" behind `passes_trade_gate()`: `net_apy`
+must be positive **and** `vol_ratio < 1` (not graded Cheap). Before this,
+`recommend` would print a "Top pick" even when every candidate netted
+negative after IL or graded Cheap — which reads as an endorsement it never
+meant to make. When nothing clears both bars, `recommend` prints an explicit
+`NO_TRADE` verdict with the specific reason(s), and shows the closest
+candidate for reference only, clearly labeled as not a recommendation.
 
 ## Pre-deposit risk & plausibility screen
 
@@ -122,6 +155,28 @@ is excluded from ranking, with the reason reported, not silently dropped.
 | apy > 5x peer median, same ticker | real yield? | **the general case** — any mechanism, known or not |
 | `investable = false` | safe? | delisted, no new deposits possible |
 | protocol `securityScore` < 50 | safe? | obviously disreputable protocols (weak floor, see below) |
+| protocol name contains "V4" | safe? | **hard-blocked by default** — see "V4 pools are hard-blocked" below |
+
+**Distinct from `flagged`: `unscoreable`.** Some pools are never evaluated
+at all — an `investment-info` fetch failed, `assetTokenList` didn't confirm
+a bStock, or there wasn't enough overlapping kline history. `scan` and
+`recommend` report these in their own list, separate from `flagged` — "we
+couldn't evaluate this" and "we evaluated it and it's unsafe/implausible"
+are different claims, and collapsing them into one silent drop (which is
+what earlier versions did) makes it impossible to tell "this pool is risky"
+from "we simply have no data on it."
+
+### Uniswap V4 pools are hard-blocked by default
+
+V4 pools can carry an arbitrary custom hook — logic outside the audited
+core AMM. This tool has no API access to a pool's hook address,
+permissions, or audit status, and the protocol-level `securityScore` can't
+see it either (V3 and V4 score identically — see the limitation note
+below). Rather than leave this as a caveat, every V4 pool is excluded from
+ranking by default, unconditionally — not only ones with an already-visible
+symptom like an extreme `feeRate`. Pass `--allow-v4` to override for an
+explicit ask or an already-vetted pool; the deeper fix (an actual hook
+audit, once that data is available) is still tracked in Roadmap.
 
 The case that motivated this: a Uniswap V4 QQQB-USDC pool showed
 `apy=1,658.77%` against 77.86% on the equivalent V3 pool for the same pair
@@ -189,15 +244,15 @@ python riskscreen.py stocks --limit 20 --type 1
 python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- recommendation (needs a signed-in `baw` session) ---
-python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000]
+python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
-python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # or without a live pool
 
 # --- portfolio + rebalance (needs a signed-in `baw` session) ---
 python riskscreen.py positions [--refresh] [--json]
-python riskscreen.py rebalance-check [--json]   # --json for scheduled monitoring, see Roadmap
+python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4]   # --json for scheduled monitoring
 ```
 
 `recommend`, `scan`, `range --investmentId`, `positions`, and
@@ -205,10 +260,20 @@ python riskscreen.py rebalance-check [--json]   # --json for scheduled monitorin
 `investment-info` / `defi position` / `defi protocol-info`), so they require
 an active Agentic Wallet session (`baw auth signin` / `baw auth verify`).
 `stocks`, `vol`, and `range --ticker/--apy` hit public Binance Web3 endpoints
-directly and need no auth.
+directly and need no auth. `--allow-v4` overrides the default V4 hard-block
+(see "Uniswap V4 pools are hard-blocked" above) — pass it only on an
+explicit ask.
 
-**Testing**: `pytest test_riskscreen.py` runs 53 unit tests over the pure-math
-functions (no network/baw needed). Live-data smoke tests for every command
+**`--json` is pure JSON on stdout** (on `scan`/`positions`/`rebalance-check`)
+— all progress/diagnostic output goes to stderr, and every payload carries
+an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
+`unscoreable`. Safe to pipe directly into `jq` or a scheduler without
+stripping table text out of it first.
+
+**Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
+runs 83 unit tests over the pure-math/pure-logic functions (no network/baw
+needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
+every push. Live-data smoke tests for every command
 are documented in "Status" below.
 
 **Execution is intentionally out of scope for this script.** `rebalance-check`
@@ -299,17 +364,25 @@ already built.
 
 ### Still open
 
-- **Uniswap V4 hook safety audit.** V4 pools can carry arbitrary custom hook
-  contracts — logic outside the audited core AMM, and a real vector for
-  malicious or just poorly-written pools (fee-skimming hooks, hooks that
-  block withdrawals, etc.). The pre-deposit screen's `securityScore` check
-  is protocol-level and explicitly does not cover this (Uniswap V3 and V4
-  score identically). What's missing is a pool/hook-level check: whether
-  the pool has a hook attached and, if so, its audit status, permissions,
-  and any known-bad-hook list match — the same "don't recommend a deposit
-  outright" caution this project already applies to volatility risk,
-  extended one layer deeper to contract risk. `query-token-audit` covers
-  this checking pattern for tokens already; a pool-level analogue is the gap.
+- **Uniswap V4 hook safety audit.** The interim mitigation shipped (every V4
+  pool is hard-blocked by default, see above) — what's still missing is the
+  actual audit capability that would let the block be lifted selectively
+  instead of blanket: whether a specific pool's hook is attached, its audit
+  status, permissions, and any known-bad-hook list match, the same
+  "don't recommend a deposit outright" caution this project already applies
+  to volatility risk, extended one layer deeper to contract risk.
+  `query-token-audit` covers this checking pattern for tokens already; a
+  pool-level analogue is the gap. Until it exists, `--allow-v4` is a manual
+  override, not a substitute.
+- **Historical calibration / backtesting.** Every range/scenario number here
+  is a model estimate as of "now" (`as_of` in `--json` output) — none of it
+  has been checked against what actually happened afterward. A paper-trading
+  or historical-replay harness (record a recommendation, revisit it N days
+  later against realized pool/price data) would validate or correct the
+  model's assumptions (the diffusion approximations, the full-range-baseline
+  treatment of platform apy, the relative-volatility pair model) instead of
+  leaving them as untested theory. Meaningfully larger scope than everything
+  else on this list — flagged, not attempted, in this pass.
 - **Robinhood Chain compatibility.** Confirmed concrete, not speculative:
   [Fables](https://www.fables.fi) is live on Robinhood Chain today, trading
   tokenized stocks (NVDA/USDG, TSLA/USDG, AAPL/USDG, SPY/USDG, ...) against
@@ -349,6 +422,50 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
+### Recently shipped (from an external code review)
+
+A read-only external review of the codebase (not just CLI behavior) found a
+real correctness bug and several design gaps. Fixed, in the order the
+review itself recommended:
+
+- **Non-stablecoin pair volatility (P0, real bug, not a caveat).**
+  `NVDAB-BNB`/`BNB-SPCXB`/`HOODB-BNB`-style pools were scored using the
+  bStock's own volatility alone, silently treating BNB as flat. Now computed
+  correctly via `resolve_pool_stock_and_quote()` + `relative_annualized_volatility()`
+  — see "Not every pool is quoted against a stablecoin" above.
+- **`NO_TRADE` as an explicit outcome (P0).** `recommend` no longer prints a
+  "Top pick" when nothing clears `passes_trade_gate()` (positive net_apy,
+  vol_ratio < 1) — see "No candidate has to mean NO_TRADE" above.
+- **Scenario stress check on `range`'s recommended range** — Neutral/Elevated/
+  Stress at 1x/1.5x/2x the estimated σ, so the recommendation's sensitivity
+  to the vol estimate is visible, not implicit. (Full historical
+  backtesting/calibration is explicitly out of scope for this pass — see
+  Roadmap.)
+- **Pure JSON `--json` contract** on `scan`/`positions`/`rebalance-check`,
+  with `as_of`, `elapsed_seconds`, `flagged`, and `unscoreable` fields —
+  previously `--json` printed the human table first, so a scheduler
+  couldn't parse stdout directly.
+- **Unified evaluation path.** `rebalance-check` now calls `run_scan()`
+  internally instead of running its own separate (and previously
+  inconsistent — it skipped `peer_apys`/`protocol_security_score` entirely)
+  market-comparison loop. `scan` and `rebalance-check` structurally cannot
+  reach different safety conclusions about the same pool now.
+- **`unscoreable` reporting** — a pool that fails to fetch, can't be
+  confirmed as a bStock, or has no usable kline overlap is now reported
+  separately from `flagged`, not silently dropped and indistinguishable
+  from "we checked it and it's fine."
+- **Uniswap V4 hard-blocked by default** (`--allow-v4` to override) — see
+  "Uniswap V4 pools are hard-blocked" above.
+- **CLI argument validation** — negative APY, negative/degenerate offsets,
+  `--max-pages <= 0` etc. now rejected at the argparse layer
+  (`_positive_int`/`_nonneg_float`/`_apy_fraction`/`_offset_fraction`)
+  instead of propagating into the model.
+- **Repo infra**: `LICENSE` (MIT), `requirements.txt`, and a GitHub Actions
+  CI workflow (`.github/workflows/test.yml`) running `py_compile` + pytest
+  on every push — none of these existed before.
+- **30 new unit tests** (83 total) covering the relative-volatility fix,
+  the V4 block, `evaluate_pool`, `passes_trade_gate`, and the CLI validators.
 
 ### Recently shipped (from a PM/QA pass)
 
