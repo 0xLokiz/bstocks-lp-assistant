@@ -52,6 +52,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -365,7 +366,10 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
       - apy is a large outlier versus other pools on the *same* underlying ticker -- this is
         the general form of the feeRate check: it catches any mechanism (stale data, a
         calculation bug, a temporary spike, a hook doing something unexpected) that produces
-        an implausible apy, not just the one specific cause already identified once.
+        an implausible apy, not just the one specific cause already identified once. `peer_apys`
+        must already exclude this pool's own apy (by identity, e.g. investmentId) -- it is used
+        as-is, not filtered by value, so two distinct pools that happen to share an apy don't
+        wrongly exclude each other.
 
     Deposit-risk signals (money going in may not be safe):
       - `investable=false` -- delisted, no new deposits possible.
@@ -397,12 +401,10 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None):
 
     apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
     if peer_apys:
-        others = sorted(a for a in peer_apys if a != apy)
-        if others:
-            median = others[len(others) // 2]
-            if median > 0 and apy > median * PEER_APY_OUTLIER_MULTIPLE:
-                flags.append(f"apy is {apy/median:.1f}x the median ({median*100:.1f}%) of other pools "
-                              f"on the same token -- outlier, treat as unverified until explained")
+        median = statistics.median(peer_apys)
+        if median > 0 and apy > median * PEER_APY_OUTLIER_MULTIPLE:
+            flags.append(f"apy is {apy/median:.1f}x the median ({median*100:.1f}%) of other pools "
+                          f"on the same token -- outlier, treat as unverified until explained")
 
     if info.get("investable") is False:
         flags.append("product is delisted (investable=false) -- no new deposits possible")
@@ -576,9 +578,11 @@ def cmd_scan(args):
         prepared.append({"pool": pool, "info": info, "stock": stock, "sigma": sigma, "apy": apy})
 
     # Pass 2: apply the risk/plausibility screen with full peer context, then score the survivors.
-    apys_by_ticker = {}
+    # Keyed by investmentId (not just apy value) so a pool excludes only itself as a "peer" --
+    # two distinct pools that happen to share an apy must not exclude each other.
+    entries_by_ticker = {}
     for p in prepared:
-        apys_by_ticker.setdefault(p["stock"]["ticker"], []).append(p["apy"])
+        entries_by_ticker.setdefault(p["stock"]["ticker"], []).append((p["pool"]["investmentId"], p["apy"]))
 
     security_score_cache = {}
     results = []
@@ -587,8 +591,8 @@ def cmd_scan(args):
         pool, info, stock, sigma, apy = p["pool"], p["info"], p["stock"], p["sigma"], p["apy"]
         protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
         security_score = fetch_protocol_security_score(protocol_id, security_score_cache) if protocol_id else None
-        flags = pool_risk_flags(pool, info, peer_apys=apys_by_ticker.get(stock["ticker"]),
-                                 protocol_security_score=security_score)
+        peer_apys = [a for inv_id, a in entries_by_ticker.get(stock["ticker"], []) if inv_id != pool["investmentId"]]
+        flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=security_score)
         if flags:
             flagged.append((pool.get("investmentName"), pool.get("protocolName"), flags))
             continue
@@ -647,7 +651,13 @@ def cmd_scan(args):
 
 def cmd_range(args):
     if args.investment_id:
-        info = fetch_investment_info(args.investment_id)
+        try:
+            info = fetch_investment_info(args.investment_id)
+        except Exception as e:
+            print(f"could not fetch pool {args.investment_id}: {e}", file=sys.stderr)
+            print("check the investmentId is correct, or run `baw auth signin` / `baw auth verify` "
+                  "if the session has expired.", file=sys.stderr)
+            sys.exit(1)
         flags = pool_risk_flags({}, info)
         if flags:
             print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}) failed the pre-deposit screen:", file=sys.stderr)
@@ -689,9 +699,14 @@ def cmd_range(args):
 
     vol_ratio = vol_richness_ratio(sigma, apy)
     grade = richness_grade(vol_ratio)
-    print(f"{label} -- vol {sigma*100:.1f}%  |  Richness Score: {grade} (vol_ratio {vol_ratio:.2f})\n")
+    vr_str = f"{vol_ratio:.2f}" if vol_ratio is not None and math.isfinite(vol_ratio) else "n/a (0% APY)"
+    print(f"{label} -- vol {sigma*100:.1f}%  |  Richness Score: {grade} (vol_ratio {vr_str})\n")
 
     rows, best = recommend_range(apy, sigma, side=args.side)
+    if best["net_apy"] <= 0:
+        print("WARNING: every candidate range nets <=0% after estimated IL -- this pool's fee "
+              "income does not currently cover the token's volatility risk. 'recommended' below "
+              "is the least-bad option, not a genuine opportunity.\n", file=sys.stderr)
     if args.side == "straddle":
         print(f"{'range':>10}{'concentration':>14}{'confidence':>12}{'eff.apy':>10}{'net_apy':>10}")
         for r in rows:
@@ -715,7 +730,12 @@ def cmd_range(args):
 
 
 def cmd_positions(args):
-    data = fetch_positions(refresh=args.refresh)
+    try:
+        data = fetch_positions(refresh=args.refresh)
+    except Exception as e:
+        print(f"could not fetch positions: {e}", file=sys.stderr)
+        print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
+        sys.exit(1)
     total = float(data.get("deFiTotalValue") or 0)
     print(f"total DeFi value: ${total:,.2f}\n")
     stock_tokens = fetch_stock_tokens()
@@ -734,7 +754,12 @@ def cmd_positions(args):
 
 def cmd_rebalance_check(args):
     print("reading current positions...", file=sys.stderr)
-    data = fetch_positions()
+    try:
+        data = fetch_positions()
+    except Exception as e:
+        print(f"could not fetch positions: {e}", file=sys.stderr)
+        print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
+        sys.exit(1)
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
     held = lp_positions_on_stock_tokens(data, stock_index)
@@ -743,7 +768,11 @@ def cmd_rebalance_check(args):
         return
 
     print("scanning current market for comparison...", file=sys.stderr)
-    market = fetch_lp_investments()
+    try:
+        market = fetch_lp_investments()
+    except Exception as e:
+        print(f"could not fetch market pools: {e}", file=sys.stderr)
+        sys.exit(1)
     market_by_id = {m["investmentId"]: m for m in market}
 
     print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
