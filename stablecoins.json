@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "_comment": "chainId/address pairs riskscreen.py treats as ~zero-volatility quote assets. Addresses are lowercased at load time. Edit this file (or point BSTOCKS_STABLECOIN_CONFIG at a different one) to add/remove entries -- no code change needed. An address NOT listed here is never presumed to be a stablecoin; it falls through to the stricter relative-volatility path instead.",
+  "stablecoins": [
+    {"chainId": "56", "address": "0x55d398326f99059ff775485246999027b3197955", "symbol": "USDT", "network": "BSC"},
+    {"chainId": "56", "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", "symbol": "USDC", "network": "BSC"},
+    {"chainId": "56", "address": "0xce24439f2d9c6a2289f741120fe202248b666666", "symbol": "U", "network": "BSC"},
+    {"chainId": "56", "address": "0x8d0d000Ee44948FC98c9B98A4FA4921476f08B0d", "symbol": "USD1", "network": "BSC"},
+    {"chainId": "1", "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "symbol": "USDT", "network": "Ethereum"},
+    {"chainId": "1", "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "symbol": "USDC", "network": "Ethereum"}
+  ]
+}

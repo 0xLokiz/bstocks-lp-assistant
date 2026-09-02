@@ -143,6 +143,16 @@ pooled assets, not either one alone. Every result carries a `pair_mode`
 results explicitly (`[non-stablecoin pair]`) rather than let them look the
 same as a stablecoin-quoted result.
 
+The stablecoin address list itself lives in [`stablecoins.json`](stablecoins.json),
+not hardcoded in the script — edit that file (or point the
+`BSTOCKS_STABLECOIN_CONFIG` env var at a different one) to add or fix an
+entry without a code change. An address absent from it is never presumed
+to be a stablecoin — it just falls through to the relative-volatility path
+above, which converges to the same answer for a genuine stablecoin quote
+anyway (its own volatility is ~0). A missing or malformed config fails
+closed to an empty set (with a warning), not a crash or a silently stale
+fallback.
+
 ## No candidate has to mean NO_TRADE
 
 Passing the pre-deposit screen (below) answers "is this pool safe and
@@ -299,7 +309,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 105 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 114 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -450,6 +460,43 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
+### Recently shipped (important logic & UX issues, from the same review)
+
+The same review's second tier — correctness/completeness issues short of a
+release blocker, but real gaps in what the tool actually checks:
+
+- **`recommend` no longer masks a position-fetch failure as "no
+  positions."** An expired session, a network error, or a malformed
+  response used to fall back to `held=[]` silently — indistinguishable
+  from genuinely holding nothing. Now prints an explicit "could not check
+  your positions" message instead.
+- **`rebalance-check` evaluates every `investmentId` on a held position,
+  not just the first**, with the same peer-apy and protocol-security
+  context `scan` uses even in the fallback path (for a held pool outside
+  the scanned page range) — previously that fallback skipped both
+  entirely, so a pool relying on the peer-outlier or security-score check
+  to get flagged could sail through undetected. Multiple ids on one
+  position now aggregate worst-case: any flagged id flags the whole
+  position, the reported `vol_ratio` is the worst among the scoreable
+  ones, and ids that can't be evaluated at all are counted and reported,
+  not silently dropped.
+- **V4-generation pools are now detected via the structured
+  `defiProtocolId`, not the display name.** Checking the live API surface
+  for a real structured field (rather than assuming none existed) turned
+  up an actual gap: PancakeSwap's own V4 is marketed as "PancakeSwap
+  Infinity," with no "v4"/"V4" substring anywhere in that name — the old
+  name-match was silently letting it through the hard block. Confirmed
+  live: `defiProtocolId="pancakeswap4"`, 3 such pools live on BSC at the
+  time this was found. None happened to be bStock pools yet, but the gap
+  was real, not hypothetical.
+- **The stablecoin address list moved to [`stablecoins.json`](stablecoins.json)**,
+  overridable via `BSTOCKS_STABLECOIN_CONFIG` — see "Not every pool is
+  quoted against a stablecoin" above.
+
+9 new tests (114 total, up from 105). Every fix verified against live
+market data — including, for the V4 case, confirming the exact real-world
+pool that the old logic missed.
 
 ### Recently shipped (pre-release blockers, from a second external review)
 

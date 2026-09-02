@@ -6,6 +6,7 @@ covered by manual CLI smoke tests (see README "Status"). Run with:
 """
 
 import argparse
+import json
 import math
 import random
 
@@ -33,6 +34,7 @@ from riskscreen import (
     _apy_fraction,
     _exact_double_barrier_no_exit_probability,
     _il_at_price_ratio,
+    _load_stablecoin_addresses,
     _nonneg_float,
     _offset_fraction,
     _peer_apys_for_ticker,
@@ -336,6 +338,41 @@ def test_is_stablecoin_false_for_bnb():
 
 def test_is_stablecoin_false_for_unknown_chain():
     assert not is_stablecoin("999", "0x55d398326f99059ff775485246999027b3197955")
+
+
+# ---- _load_stablecoin_addresses (config-file, not hardcoded-in-code) ----
+
+def test_load_stablecoin_addresses_reads_and_lowercases_config(tmp_path):
+    config = tmp_path / "stablecoins.json"
+    config.write_text(json.dumps({
+        "version": 1,
+        "stablecoins": [{"chainId": "56", "address": "0xABCDEF", "symbol": "FAKE"}],
+    }))
+    addresses = _load_stablecoin_addresses(str(config))
+    assert addresses == {("56", "0xabcdef")}
+
+
+def test_load_stablecoin_addresses_fails_closed_on_missing_file(tmp_path, capsys):
+    missing = tmp_path / "does_not_exist.json"
+    addresses = _load_stablecoin_addresses(str(missing))
+    assert addresses == set()  # empty, not a crash -- and not a stale in-code fallback
+    assert "warning" in capsys.readouterr().err.lower()
+
+
+def test_load_stablecoin_addresses_fails_closed_on_malformed_json(tmp_path, capsys):
+    config = tmp_path / "stablecoins.json"
+    config.write_text("{not valid json")
+    addresses = _load_stablecoin_addresses(str(config))
+    assert addresses == set()
+    assert "warning" in capsys.readouterr().err.lower()
+
+
+def test_load_stablecoin_addresses_fails_closed_on_missing_stablecoins_key(tmp_path, capsys):
+    config = tmp_path / "stablecoins.json"
+    config.write_text(json.dumps({"version": 1}))  # valid JSON, wrong shape
+    addresses = _load_stablecoin_addresses(str(config))
+    assert addresses == set()
+    assert "warning" in capsys.readouterr().err.lower()
 
 
 # ---- relative_annualized_volatility (the non-stablecoin-pair fix) ----

@@ -188,19 +188,42 @@ def best_available_volatility(klines, interval="1d"):
     return yz if yz is not None else annualized_volatility(klines, interval)
 
 
-# BSC/ETH stablecoins this product's LP pools are commonly quoted against. Addresses lowercased,
-# keyed (chainId, address) -- matches binance-agentic-wallet's Common Token Addresses table.
-STABLECOIN_ADDRESSES = {
-    ("56", "0x55d398326f99059ff775485246999027b3197955"),  # USDT (BSC)
-    ("56", "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"),  # USDC (BSC)
-    ("56", "0xce24439f2d9c6a2289f741120fe202248b666666"),  # U (BSC)
-    ("56", "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d"),  # USD1 (BSC)
-    ("1", "0xdac17f958d2ee523a2206206994597c13d831ec7"),   # USDT (Ethereum)
-    ("1", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),   # USDC (Ethereum)
-}
+STABLECOIN_CONFIG_ENV_VAR = "BSTOCKS_STABLECOIN_CONFIG"
+DEFAULT_STABLECOIN_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stablecoins.json")
+
+
+def _load_stablecoin_addresses(config_path=None):
+    """Load the (chainId, address) stablecoin set from a JSON config instead of a hardcoded
+    constant in this file, so a new stablecoin -- or a wrong one -- is fixed by editing
+    stablecoins.json, not shipping a code change. Path resolution: an explicit `config_path`
+    argument, else the BSTOCKS_STABLECOIN_CONFIG env var, else the bundled stablecoins.json
+    next to this script.
+
+    Fails closed on a missing/malformed config: prints a warning and returns an empty set
+    rather than crashing the whole script or silently keeping a stale in-code fallback. An
+    empty set doesn't misclassify pools as unsafe -- is_stablecoin() already treats "not in
+    the set" as non_stablecoin, so every pool just falls through to the stricter
+    relative-volatility path (which converges to the same answer for a genuine stablecoin
+    quote anyway, since its own volatility is ~0) instead of silently trusting a name.
+    """
+    path = config_path or os.environ.get(STABLECOIN_CONFIG_ENV_VAR) or DEFAULT_STABLECOIN_CONFIG_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {(str(e["chainId"]), e["address"].lower()) for e in data["stablecoins"]}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"warning: could not load stablecoin config from {path} ({e}) -- treating no "
+              f"quote asset as a stablecoin until this is fixed (safer than guessing wrong)",
+              file=sys.stderr)
+        return set()
+
+
+STABLECOIN_ADDRESSES = _load_stablecoin_addresses()
 
 
 def is_stablecoin(chain_id, address):
+    """An address NOT in STABLECOIN_ADDRESSES is never presumed to be a stablecoin -- an
+    unrecognized quote asset always falls through to the stricter relative-volatility path."""
     return (str(chain_id), address.lower()) in STABLECOIN_ADDRESSES
 
 
