@@ -51,6 +51,7 @@ the `investmentId` + token addresses; actually moving funds goes through
 
 import argparse
 import concurrent.futures
+import functools
 import json
 import math
 import os
@@ -120,10 +121,19 @@ def _get(url, params, max_retries=HTTP_MAX_RETRIES):
 BSTOCK_TYPE = 3  # RWA list `type`: 1=Ondo ("...on"), 2=xStocks ("...x"), 3=bStock ("...B")
 
 
+@functools.lru_cache(maxsize=None)
 def fetch_stock_tokens(type_filter=BSTOCK_TYPE):
     """Defaults to bStock (type=3) only -- this product is scoped to bStocks specifically,
     not tokenized-stock LPs on other providers. Pass type_filter=None for every platform,
-    or 1/2 to browse Ondo/xStocks instead."""
+    or 1/2 to browse Ondo/xStocks instead.
+
+    Memoized (in-process only, no cross-invocation persistence -- each CLI run is a fresh
+    process, so there's no staleness to manage): the token list doesn't change within the
+    lifetime of a single command, but was being refetched multiple times per run regardless
+    (e.g. recommend calling it again after run_scan's own internal fetch, just to check held
+    positions). The list only has ~100 entries and the return value is only ever read, never
+    mutated in place, so caching the exact object is safe.
+    """
     params = {"type": type_filter} if type_filter else {}
     body = _get(RWA_LIST_URL, params)
     if not body.get("success"):
@@ -131,7 +141,15 @@ def fetch_stock_tokens(type_filter=BSTOCK_TYPE):
     return body["data"]
 
 
+@functools.lru_cache(maxsize=None)
 def fetch_klines(chain_id, contract_address, interval="1d", limit=90):
+    """Memoized in-process for the same reason as fetch_stock_tokens: the same token's klines
+    can be requested more than once per command (run_scan's own batch plus a held-position
+    fallback evaluation on the same ticker, for instance) -- caching by the exact call
+    signature eliminates the duplicate network round-trip. thread-safe (lru_cache has an
+    internal lock); a rare race under concurrent first-access from two different
+    ThreadPoolExecutors could still produce one redundant fetch, never a correctness issue.
+    """
     body = _get(KLINE_URL, {
         "chainId": chain_id,
         "contractAddress": contract_address,

@@ -379,6 +379,20 @@ whatever scoreable sliver happened to survive a bad run (a symptom of a
 systemic problem — network trouble, a `baw` session issue — not a reason
 to trust the remainder as representative).
 
+`fetch_stock_tokens()` and `fetch_klines()` are memoized in-process
+(`functools.lru_cache`) — the token list and a given token's klines don't
+change within the lifetime of one command, but were being refetched
+regardless (`recommend` used to call `fetch_stock_tokens()` again just to
+check held positions, after `run_scan()` had already fetched it
+internally). No cross-invocation persistence or TTL: each CLI run is a
+fresh process, so the cache is empty at the start of every run and there's
+no staleness to manage. Pool status/APY/TVL (`defi investment-list` /
+`investment-info`) is deliberately **not** cached even within a run — that
+data changing fast is exactly what a risk screener needs to see, and
+caching it would trade the one thing this tool is supposed to get right
+for a speedup that matters far less than the `ThreadPoolExecutor`
+concurrency fix below already delivered.
+
 ## Performance
 
 Every `baw` call is a separate Node.js process spawn (~0.6s of pure
@@ -540,12 +554,18 @@ bad verdict" above for the full picture; in brief:
 - **`recommend` refuses a verdict** (explicit `NO_TRADE`) when more than
   50% of candidate pools couldn't be evaluated at all, instead of quietly
   picking a "Top pick" from an unrepresentative scoreable sliver.
+- **`fetch_stock_tokens()`/`fetch_klines()` are memoized in-process** —
+  no more re-fetching the token list a second time just to check held
+  positions after `run_scan()` already fetched it. Deliberately not
+  extended to pool status/APY/TVL — see "Reliability" above for why.
 
 2 new tests (124 total). Verified live (successful fetch, URL-encoding of
-special characters, and a genuinely unreachable host retrying then failing
-with a clear diagnosable error) and via two synthetic end-to-end scenarios
-for the `recommend` refuse-threshold (normal case unaffected, high-failure
-case correctly refuses).
+special characters, a genuinely unreachable host retrying then failing
+with a clear diagnosable error, and — for the caching fix — counting
+actual HTTP calls across a full `recommend` run to confirm the second
+`fetch_stock_tokens()` call became a cache hit, not a real fetch) and via
+two synthetic end-to-end scenarios for the `recommend` refuse-threshold
+(normal case unaffected, high-failure case correctly refuses).
 
 ### Recently shipped (important logic & UX issues, from the same review)
 
