@@ -299,7 +299,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 83 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 105 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -450,6 +450,56 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
+### Recently shipped (pre-release blockers, from a second external review)
+
+A follow-up review of the codebase itself (not just CLI output) flagged four
+issues as blockers before trusting this for real money. Fixed in the order
+the review prioritized them:
+
+- **Windows command-injection risk in `baw()` (the top-priority fix).**
+  `baw()` built a single shell command string via concatenation and ran it
+  with `shell=True` — `subprocess.list2cmdline` only does CRT-style argv
+  quoting, not shell-metacharacter escaping, so a value flowing into an
+  argument (a CLI `--investmentId` flag, or an id pulled from an API
+  response) containing `&`, `|`, `^`, etc. could break out of the intended
+  command. Every argument is now validated against a shell-metacharacter
+  blocklist before it can reach a command line at all, `baw`'s absolute path
+  is resolved via `shutil.which` instead of shell PATH search, and
+  `subprocess.run` uses `shell=False` throughout. Verified live: a
+  deliberate `"123 & calc.exe"` payload is now rejected with `ValueError`
+  before subprocess is ever invoked; non-ASCII output decoding (Chinese
+  pool/company names) stayed byte-identical to before, confirmed by diffing
+  against the pre-fix code path directly — no regression there.
+- **`relative_annualized_volatility` hardened against sparse/misaligned
+  klines.** The non-stablecoin-pair path aligned two independently-fetched
+  kline series by open-time intersection with no floor on how few or gappy
+  that overlap could be — two series can intersect into something far
+  sparser than either alone (different listing dates, uneven on-chain
+  activity), silently understating variance while still producing a
+  normal-looking number. Now requires ≥30 aligned candles *and* ≥80%
+  coverage of the theoretical fully-dense span between the first and last
+  aligned candle; falling short of either returns `sigma=None` with a
+  specific reason, routed into the existing `unscoreable` reporting instead
+  of a misleadingly precise number.
+- **Two-asset pool assumption validated in `resolve_pool_stock_and_quote`.**
+  It picked the first bStock match and the first differing-address token as
+  "the" quote asset with no check that a pool actually had exactly 2 assets
+  or exactly 1 bStock — a 3-asset weighted pool or a dual-bStock pool would
+  silently get treated as an ordinary 2-asset pair, which this tool's
+  `E[IL] ~ σ²/8` model doesn't generalize to. Now requires exactly 2
+  distinct on-chain addresses and exactly 1 confirmed bStock; anything else
+  returns `pair_mode="unsupported"`, routed into `unscoreable` with a
+  specific reason rather than silently mis-scored.
+- **`net_apy` renamed to `model_net_apy`, plus `MODEL_APY_CAVEAT`** — see
+  the Caveats section above. Checked live against `defi investment-info` on
+  100 sampled pools to confirm no fee-vs-incentive breakdown, timestamp, or
+  lockup/expiry data actually exists in the API before documenting that as a
+  limit rather than fabricating a breakdown.
+
+6 new tests plus several rewritten fixtures (105 total, up from 99). Every
+fix was verified against the real `baw` CLI and live market data, not just
+the test suite, before shipping.
 
 ### Recently shipped (from an external code review)
 
