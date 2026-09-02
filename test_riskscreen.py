@@ -5,14 +5,15 @@ covered by manual CLI smoke tests (see README "Status"). Run with:
     pytest test_riskscreen.py -v
 """
 
+import argparse
 import math
+import random
 
 import pytest
 
-import argparse
-
 from riskscreen import (
     annualized_volatility,
+    best_available_volatility,
     breakeven_volatility,
     concentration_multiplier,
     confidence_grade,
@@ -28,18 +29,27 @@ from riskscreen import (
     resolve_pool_stock_and_quote,
     richness_grade,
     vol_richness_ratio,
+    yang_zhang_volatility,
     _apy_fraction,
+    _exact_double_barrier_no_exit_probability,
     _il_at_price_ratio,
     _nonneg_float,
     _offset_fraction,
     _positive_int,
+    _rogers_satchell_variance,
     _single_barrier_touch_probability,
+    _union_bound_no_exit_probability,
 )
 
 
 def make_klines(closes):
     """Build minimal kline rows (only the close field, index 4, is read)."""
     return [[i, "0", "0", "0", str(c), "0", i] for i, c in enumerate(closes)]
+
+
+def make_ohlc_klines(rows):
+    """rows: list of (open, high, low, close) tuples -> full kline rows."""
+    return [[i, str(o), str(h), str(l), str(c), "0", i] for i, (o, h, l, c) in enumerate(rows)]
 
 
 # ---- annualized_volatility ----
@@ -171,8 +181,11 @@ def test_no_exit_probability_narrower_range_is_less_safe():
 
 
 def test_no_exit_probability_never_negative():
-    # a very narrow range at high vol should clamp at 0, not go negative
-    assert no_exit_probability(0.99, 1.01, sigma_annual=2.0) == 0.0
+    # a very narrow range at high vol should be ~0 (not literally negative) -- the exact
+    # reflection-series formula correctly returns a tiny positive number here rather than
+    # clamping to exactly 0 like the old union-bound approximation did
+    result = no_exit_probability(0.99, 1.01, sigma_annual=2.0)
+    assert 0.0 <= result < 0.001
 
 
 # ---- range_metrics ----
@@ -518,6 +531,121 @@ def test_offset_fraction_rejects_price_crushing_offset():
 def test_offset_fraction_accepts_normal_range():
     assert _offset_fraction("0.15") == 0.15
     assert _offset_fraction("-0.5") == -0.5
+
+
+# ---- Rogers-Satchell / Yang-Zhang volatility ----
+
+def test_rogers_satchell_zero_for_flat_candle():
+    # open == high == low == close -> no intraday range -> zero contribution
+    assert _rogers_satchell_variance(100, 100, 100, 100) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_rogers_satchell_positive_for_normal_candle():
+    assert _rogers_satchell_variance(o=100, h=105, l=98, c=102) > 0
+
+
+def test_yang_zhang_needs_at_least_3_candles():
+    assert yang_zhang_volatility(make_ohlc_klines([(100, 101, 99, 100)] * 2)) is None
+
+
+def test_yang_zhang_zero_for_perfectly_flat_series():
+    flat = [(100, 100, 100, 100)] * 10
+    sigma = yang_zhang_volatility(make_ohlc_klines(flat))
+    assert sigma == pytest.approx(0.0, abs=1e-9)
+
+
+def test_yang_zhang_positive_for_varying_series():
+    rows = [(100, 103, 98, 101), (101, 106, 99, 104), (104, 105, 96, 97),
+            (97, 102, 95, 100), (100, 108, 99, 106), (106, 107, 100, 102)]
+    sigma = yang_zhang_volatility(make_ohlc_klines(rows))
+    assert sigma is not None and sigma > 0
+
+
+def test_yang_zhang_falls_back_to_none_on_degenerate_ohlc():
+    # a zero/negative field must not crash -- best_available_volatility handles the fallback
+    rows = make_ohlc_klines([(100, 101, 99, 100), (0, 101, 99, 100), (101, 102, 100, 101)])
+    assert yang_zhang_volatility(rows) is None
+
+
+def test_best_available_volatility_prefers_yang_zhang_when_available():
+    rows = [(100, 103, 98, 101), (101, 106, 99, 104), (104, 105, 96, 97), (97, 102, 95, 100)]
+    klines = make_ohlc_klines(rows)
+    assert best_available_volatility(klines) == yang_zhang_volatility(klines)
+
+
+def test_best_available_volatility_falls_back_to_close_to_close():
+    # degenerate OHLC (a zero field) but valid closes -- yang_zhang_volatility returns None,
+    # best_available_volatility must still return the close-to-close answer, not None
+    closes = [100, 105, 98, 110, 95, 103]
+    bad_ohlc = [[i, "0", str(h), str(h - 1), str(c), "0", i] for i, (c, h) in enumerate(zip(closes, [c + 5 for c in closes]))]
+    result = best_available_volatility(bad_ohlc)
+    assert result is not None
+    assert result == annualized_volatility(bad_ohlc)
+
+
+# ---- Exact double-barrier probability, validated against Monte Carlo ----
+
+def _monte_carlo_no_exit_probability(pa, pb, sigma, years=1.0, n_paths=4000, n_steps=100, seed=1234):
+    """Reference implementation via direct discretized GBM path simulation (driftless, log-
+    space random walk) -- ground truth to validate the closed-form reflection series against.
+    Pure stdlib (random.gauss), no numpy, consistent with the rest of this project."""
+    rng = random.Random(seed)
+    dt = years / n_steps
+    step_scale = sigma * math.sqrt(dt)
+    survived = 0
+    log_pa, log_pb = math.log(pa), math.log(pb)
+    for _ in range(n_paths):
+        log_p = 0.0
+        exited = False
+        for _ in range(n_steps):
+            log_p += step_scale * rng.gauss(0, 1)
+            if log_p <= log_pa or log_p >= log_pb:
+                exited = True
+                break
+        if not exited:
+            survived += 1
+    return survived / n_paths
+
+
+@pytest.mark.parametrize("pa,pb,sigma", [
+    (0.8, 1.2, 0.3),
+    (0.5, 1.5, 0.4),
+    (0.9, 1.1, 0.5),
+    (0.7, 1.3, 0.2),
+])
+def test_exact_double_barrier_matches_monte_carlo(pa, pb, sigma):
+    exact = _exact_double_barrier_no_exit_probability(pa, pb, sigma, years=1.0)
+    mc = _monte_carlo_no_exit_probability(pa, pb, sigma, years=1.0)
+    # n_paths=4000 at p~0.5 has a standard error of ~0.008; 0.05 is a ~6-sigma margin,
+    # generous enough to not be flaky while still catching a genuinely wrong formula
+    assert abs(exact - mc) < 0.05, f"exact={exact:.4f} vs monte carlo={mc:.4f} for pa={pa} pb={pb} sigma={sigma}"
+
+
+def test_exact_double_barrier_tighter_than_union_bound():
+    # the exact probability must be >= the conservative union-bound approximation it replaced
+    # (the union bound is a proven lower bound on the true survival probability)
+    pa, pb, sigma = 0.8, 1.2, 0.4
+    exact = _exact_double_barrier_no_exit_probability(pa, pb, sigma)
+    bound = _union_bound_no_exit_probability(pa, pb, sigma)
+    assert exact >= bound - 1e-9
+
+
+def test_exact_double_barrier_bounded_zero_one():
+    for sigma in [0.1, 0.5, 1.0, 2.0, 5.0]:
+        p = _exact_double_barrier_no_exit_probability(0.9, 1.1, sigma)
+        assert 0.0 <= p <= 1.0
+
+
+def test_no_exit_probability_uses_exact_when_straddling():
+    pa, pb, sigma = 0.8, 1.2, 0.4
+    assert no_exit_probability(pa, pb, sigma) == pytest.approx(
+        _exact_double_barrier_no_exit_probability(pa, pb, sigma))
+
+
+def test_no_exit_probability_falls_back_when_not_straddling():
+    # pa >= 1 -- not a valid input to the straddling reflection formula, must use the fallback
+    result = no_exit_probability(1.1, 1.3, 0.4)
+    assert result == pytest.approx(_union_bound_no_exit_probability(1.1, 1.3, 0.4))
 
 
 if __name__ == "__main__":

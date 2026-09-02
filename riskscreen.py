@@ -128,6 +128,65 @@ def annualized_volatility(klines, interval="1d"):
     return _log_return_volatility(closes, interval)
 
 
+def _rogers_satchell_variance(o, h, l, c):
+    """Per-candle Rogers-Satchell variance term -- drift-independent (Rogers & Satchell, 1991)."""
+    return math.log(h / c) * math.log(h / o) + math.log(l / c) * math.log(l / o)
+
+
+def yang_zhang_volatility(klines, interval="1d"):
+    """Yang-Zhang (2000) OHLC volatility estimator: sigma_YZ^2 = sigma_overnight^2 +
+    k*sigma_open_close^2 + (1-k)*sigma_RogersSatchell^2, k = 0.34/(1.34 + (n+1)/(n-1)).
+
+    Source: Yang, D. and Zhang, Q., "Drift-Independent Volatility Estimation Based on High,
+    Low, Open, and Close Prices", Journal of Business, 2000. Unlike annualized_volatility
+    (close-to-close only), this uses all four OHLC prices our kline data already carries and
+    is ~5-14x more statistically efficient at the same sample size (per Yang-Zhang and the
+    range-based-estimator literature it builds on) -- meaningful here because our kline
+    history is often short. It's also drift-independent (unbiased under a trending price,
+    unlike naive close-to-close over a short window) and, structurally relevant to bStocks
+    specifically: the overnight (close-to-open) term explicitly separates out the jump across
+    a session gap instead of blending it uniformly into one return series -- a step toward
+    the "session-aware volatility" idea in the README/Roadmap, not a full implementation of it
+    (it doesn't yet distinguish *which* gaps are real trading-hours boundaries).
+
+    This is the primary estimator for stablecoin-quoted pools now (annualized_volatility is
+    kept as the fallback when OHLC data looks degenerate, and is still what
+    relative_annualized_volatility uses for the non-stablecoin/ratio case -- there is no
+    standard OHLC estimator for a *ratio* of two assets' prices in the literature, so that
+    path is a documented, deliberate scope limit, not an oversight).
+    """
+    rows = [row for row in klines if all(float(row[i]) > 0 for i in (1, 2, 3, 4))]
+    if len(rows) < 3:
+        return None
+    opens = [float(r[1]) for r in rows]
+    highs = [float(r[2]) for r in rows]
+    lows = [float(r[3]) for r in rows]
+    closes = [float(r[4]) for r in rows]
+
+    n = len(rows) - 1
+    overnight = [math.log(opens[i] / closes[i - 1]) for i in range(1, len(rows))]
+    open_close = [math.log(closes[i] / opens[i]) for i in range(1, len(rows))]
+    rs_terms = [_rogers_satchell_variance(opens[i], highs[i], lows[i], closes[i]) for i in range(1, len(rows))]
+
+    mean_on = sum(overnight) / n
+    var_on = sum((x - mean_on) ** 2 for x in overnight) / (n - 1) if n > 1 else 0.0
+    mean_oc = sum(open_close) / n
+    var_oc = sum((x - mean_oc) ** 2 for x in open_close) / (n - 1) if n > 1 else 0.0
+    var_rs = sum(rs_terms) / n
+
+    k = 0.34 / (1.34 + (n + 1) / (n - 1)) if n > 1 else 0.34
+    var_yz = max(var_on + k * var_oc + (1 - k) * var_rs, 0.0)
+    periods_per_year = INTERVAL_TO_ANNUALIZATION.get(interval, DAYS_PER_YEAR)
+    return math.sqrt(var_yz * periods_per_year)
+
+
+def best_available_volatility(klines, interval="1d"):
+    """Yang-Zhang when the OHLC data supports it, falling back to close-to-close otherwise --
+    the single volatility function callers should reach for on a stablecoin-quoted pool."""
+    yz = yang_zhang_volatility(klines, interval)
+    return yz if yz is not None else annualized_volatility(klines, interval)
+
+
 # BSC/ETH stablecoins this product's LP pools are commonly quoted against. Addresses lowercased,
 # keyed (chainId, address) -- matches binance-agentic-wallet's Common Token Addresses table.
 STABLECOIN_ADDRESSES = {
@@ -193,7 +252,7 @@ def resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode):
         return None
     stock_klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
     if pair_mode == "stablecoin":
-        return annualized_volatility(stock_klines)
+        return best_available_volatility(stock_klines)
     quote_klines = fetch_klines(chain_id, quote_addr, limit=91)
     return relative_annualized_volatility(stock_klines, quote_klines)
 
@@ -297,17 +356,51 @@ def _single_barrier_touch_probability(barrier_ratio, sigma_annual, years=1.0):
     return 2 * (1 - _normal_cdf(a))
 
 
-def no_exit_probability(pa, pb, sigma_annual, years=1.0):
-    """Conservative probability that price stays within [pa, pb] for the *entire* period
-    (not just the endpoint), via a first-order union-bound approximation:
-    1 - P(touch pa) - P(touch pb). Exact double-barrier first-passage needs an infinite
-    reflection series; this approximation is safe-direction (slightly understates the true
-    no-exit probability) as long as the two barriers aren't very close together -- appropriate
-    for a "safety floor" metric, where understating safety is the conservative error to make.
-    """
+def _union_bound_no_exit_probability(pa, pb, sigma_annual, years=1.0):
+    """The original conservative approximation: 1 - P(touch pa) - P(touch pb). Kept as a
+    fallback/reference; no_exit_probability now uses the exact reflection series below."""
     p_low = _single_barrier_touch_probability(pa, sigma_annual, years)
     p_high = _single_barrier_touch_probability(pb, sigma_annual, years)
     return max(0.0, 1 - p_low - p_high)
+
+
+def _exact_double_barrier_no_exit_probability(pa, pb, sigma_annual, years=1.0, terms=15):
+    """Exact probability a driftless lognormal price stays within [pa, pb] for the entire
+    period, via the method-of-images reflection series for Brownian motion absorbed at two
+    barriers -- the classical closed-form solution (see double-barrier option pricing
+    literature, e.g. Kunitomo & Ikeda 1992), not an approximation. In log-price space with
+    a=ln(pa) < 0 < b=ln(pb), w=b-a, s=sigma*sqrt(years):
+
+        P(survive) = sum_{n=-N}^{N} { [Phi((b-2nw)/s) - Phi((a-2nw)/s)]
+                                       - [Phi((b-2a+2nw)/s) - Phi((-a+2nw)/s)] }
+
+    Terms decay ~Gaussian in n, so a truncated sum (default 15 terms each side) converges to
+    machine precision for any realistic (pa, pb, sigma, years) combination here. Cross-checked
+    against direct Monte Carlo path simulation in test_riskscreen.py -- if you touch this
+    formula, re-run those tests; a silently-wrong "exact" result is worse than the honest
+    approximation it replaces.
+    """
+    s = sigma_annual * math.sqrt(years)
+    if s <= 0:
+        return 1.0
+    a, b = math.log(pa), math.log(pb)
+    w = b - a
+    total = 0.0
+    for n in range(-terms, terms + 1):
+        term1 = _normal_cdf((b - 2 * n * w) / s) - _normal_cdf((a - 2 * n * w) / s)
+        term2 = _normal_cdf((b - 2 * a + 2 * n * w) / s) - _normal_cdf((-a + 2 * n * w) / s)
+        total += term1 - term2
+    return min(max(total, 0.0), 1.0)
+
+
+def no_exit_probability(pa, pb, sigma_annual, years=1.0):
+    """Probability that price stays within [pa, pb] for the *entire* period (not just the
+    endpoint). Uses the exact reflection-series formula when the start price 1.0 is strictly
+    between the barriers (the case it's derived for); falls back to the conservative
+    union-bound approximation otherwise (degenerate/edge inputs)."""
+    if not (pa < 1 < pb):
+        return _union_bound_no_exit_probability(pa, pb, sigma_annual, years)
+    return _exact_double_barrier_no_exit_probability(pa, pb, sigma_annual, years)
 
 
 def range_metrics(pool_apy, sigma_annual, pa, pb, years=1.0):
@@ -669,7 +762,7 @@ def cmd_vol(args):
         sys.exit(1)
     for t in matches:
         klines = fetch_klines(t["chainId"], t["contractAddress"], limit=args.days + 1)
-        sigma = annualized_volatility(klines)
+        sigma = best_available_volatility(klines)
         if sigma is None:
             print(f"{t['symbol']} (chain {t['chainId']}): not enough kline history")
             continue
@@ -782,8 +875,10 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         stock_klines = kline_cache.get(stock_key)
         if pair_mode == "stablecoin":
             # quote is a stablecoin -- its own volatility is ~0, so IL is driven almost
-            # entirely by the bStock's own volatility (see README "The idea").
-            sigma = annualized_volatility(stock_klines) if stock_klines else None
+            # entirely by the bStock's own volatility (see README "The idea"). Yang-Zhang
+            # (best_available_volatility) uses the OHLC data we already have instead of
+            # close-only, for a more statistically efficient, drift-independent estimate.
+            sigma = best_available_volatility(stock_klines) if stock_klines else None
         else:
             # non-stablecoin quote (e.g. bStock/BNB): IL depends on the *relative* price move
             # between the two pooled assets, not the bStock's volatility alone. Using the
@@ -983,7 +1078,7 @@ def cmd_range(args):
             sys.exit(1)
         stock = matches[0]
         klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
-        sigma = annualized_volatility(klines)
+        sigma = best_available_volatility(klines)
         apy = args.apy
         label = f"{stock['symbol']} @ {apy*100:.2f}% pool APY (assumes a stablecoin-quoted pair)"
         pool_tvl = None  # no live pool -- no TVL to size a position against

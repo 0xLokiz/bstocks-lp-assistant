@@ -59,7 +59,22 @@ E[IL] ≈ σ² / 8      (annualized, full-range / V2-style liquidity)
 ```
 
 where `σ` is the token's annualized volatility, estimated from its on-chain
-kline history (log-return stdev, annualized by `sqrt(365)`).
+kline history.
+
+**Volatility estimator**: for stablecoin-quoted pools, `σ` now comes from
+the **Yang-Zhang estimator** (Yang & Zhang, 2000, *"Drift-Independent
+Volatility Estimation Based on High, Low, Open, and Close Prices"*, Journal
+of Business) — it uses all four OHLC prices our kline data already carries
+instead of close-only, is drift-independent (unbiased under a trending
+price), and is ~5-14x more statistically efficient than close-to-close at
+the same sample size (per the range-based-estimator literature — see also
+[Parkinson 1980](https://www.jstor.org/stable/2352357) and
+[Garman-Klass 1980](https://doi.org/10.1086/296083), which Yang-Zhang
+builds on). It falls back to plain close-to-close (`annualized_volatility`)
+when the OHLC data looks degenerate. Non-stablecoin pairs still use
+close-to-close on the price *ratio* — there's no standard OHLC estimator
+for a ratio of two assets in the literature, a documented scope limit, not
+an oversight.
 
 ### The scientific comparison: breakeven volatility
 
@@ -211,10 +226,11 @@ V4-hook-safety item this doesn't replace.
   `binance-tokenized-securities-info`'s asset-market-status API for upcoming
   corporate actions on any pool you're about to enter. A `vol_ratio` from a
   short kline history is a noisy estimate, not a precise number.
-- **The straddle no-exit probability is a loose, conservative bound** — it
-  can read `0%` for narrow ranges even when the true probability is a small
-  positive number. That's the union-bound approximation being loose, not a
-  claim of literal impossibility.
+- **The straddle no-exit probability is now the exact closed-form value**
+  (a method-of-images reflection series, not an approximation), validated
+  against direct Monte Carlo path simulation in the test suite. It replaced
+  a looser union-bound approximation that used to read `0%` for narrow
+  ranges even when the true probability was a small positive number.
 - **Sided (limit-order) ranges reuse the IL-vs-hold formula as a generic
   cost proxy** — it does not yet model the effective average execution
   price versus a plain limit order at the boundary. A known simplification,
@@ -403,20 +419,20 @@ already built.
   (using `binance-tokenized-securities-info`'s market-status API to label
   each candle) would likely sharpen `vol_ratio` and range recommendations
   for exactly the reason Fables built a whole fee model around it.
-- **Exact double-barrier probability**, replacing the current conservative
-  union-bound approximation for straddling ranges (`no_exit_probability`)
-  with the proper reflection-principle series — tightens the `0%` readings
-  narrow ranges currently get, without changing the safe-direction bias.
 - **Effective execution-price model for single-sided ranges** — right now a
   `--side sell`/`buy` range reuses the IL-vs-hold formula as a cost proxy;
   the real question ("what average price do I actually sell/buy at, versus
   a plain limit order at the boundary") needs its own model, not a borrowed
   one.
-- **Volatility-uncertainty-aware scoring.** `vol_ratio` currently uses a
-  point estimate of realized vol; a short kline history makes that noisy.
-  Widening `σ` by a confidence bound (or moving to a GARCH-style estimator)
-  before computing `vol_ratio` would stop a thin data window from reading as
-  false precision.
+- **Volatility-uncertainty-aware scoring.** `vol_ratio` still uses a point
+  estimate of realized vol (now Yang-Zhang instead of close-to-close — see
+  "Recently shipped" — but a point estimate regardless); a short kline
+  history makes that noisy. Widening `σ` by a confidence bound (realized
+  variance's sampling distribution is chi-squared, so this is derivable in
+  closed form) before computing `vol_ratio` would stop a thin data window
+  from reading as false precision. A full GARCH/EWMA forecasting model is a
+  further step past that, with more implementation cost for a less certain
+  payoff on kline histories this short.
 - **Automatic corporate-action gating.** The "check for upcoming corporate
   actions" step is currently a manual reminder in `SKILL.md`; it should be a
   direct call to `binance-tokenized-securities-info`'s asset-market-status
@@ -429,6 +445,16 @@ A read-only external review of the codebase (not just CLI behavior) found a
 real correctness bug and several design gaps. Fixed, in the order the
 review itself recommended:
 
+- **Yang-Zhang OHLC volatility estimator**, replacing close-to-close for
+  stablecoin-quoted pools — drift-independent, ~5-14x more statistically
+  efficient at the same sample size, using the O/H/L/C data our klines
+  already carry (see "The idea" above). Researched and grounded in the
+  published estimator literature, not implemented from memory alone.
+- **Exact double-barrier no-exit probability**, replacing the conservative
+  union-bound approximation with the closed-form reflection-series
+  solution — validated against direct Monte Carlo path simulation in
+  `test_riskscreen.py` before shipping (a wrong "exact" formula would be
+  worse than the honest approximation it replaced).
 - **Non-stablecoin pair volatility (P0, real bug, not a caveat).**
   `NVDAB-BNB`/`BNB-SPCXB`/`HOODB-BNB`-style pools were scored using the
   bStock's own volatility alone, silently treating BNB as flat. Now computed

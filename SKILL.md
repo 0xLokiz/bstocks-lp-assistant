@@ -33,9 +33,14 @@ a sharp desk analyst would in a Slack DM, not the way a whitepaper would.
 Headline LP APY is compensation for taking on impermanent loss (IL), and IL
 scales with the volatility of the pooled asset. Ranking pools by raw APY
 alone hides how much of that yield is actually paying for risk. This skill
-computes volatility from each stock token's on-chain kline history, prices
-that risk properly, and nets it out of the pool's APY before ranking, using
-`riskscreen.py` in this directory.
+computes volatility from each stock token's on-chain kline history (Yang-Zhang
+OHLC estimator for stablecoin-quoted pools, close-to-close ratio for
+non-stablecoin pairs), prices that risk properly, and nets it out of the
+pool's APY before ranking, using `riskscreen.py` in this directory.
+`no_exit_probability` uses the exact double-barrier reflection-series
+solution, not an approximation — see README "The idea" / "Recently shipped"
+for both, including how the reflection formula was validated (Monte Carlo,
+not just derived from memory) before shipping.
 
 ## Scope: bStocks only
 
