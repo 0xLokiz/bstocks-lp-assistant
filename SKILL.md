@@ -1,17 +1,17 @@
 ---
-name: lp-risk-screener
-description: Rank Binance Web3 liquidity pools on tokenized-stock pairs by risk-adjusted APY, recommend a concentrated-liquidity price range that trades off safety vs yield, and check held LP positions against the current market. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, screen for risk-adjusted yield, review their current LP positions, or asks whether to rebalance. Does not execute deposits/withdrawals itself — see "Executing a recommendation" below.
+name: bstocks-lp-assistant
+description: Volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks) pools. Ranks pools by a breakeven-volatility "is this vol richly priced" score (not raw APY), recommends a concentrated-liquidity price range -- symmetric market-making, or a single-sided range used as a yield-enhanced limit buy/sell order -- and checks held LP positions against the current market. Use when the user asks to compare LP/yield-farming pools, find the "best" LP for a stock token, pick a price range for a concentrated LP position, use an LP range to buy/sell at a target price, screen for risk-adjusted yield, review their current LP positions, or asks whether to rebalance. Does not execute deposits/withdrawals itself -- see "Executing a recommendation" below.
 ---
 
-# LP Risk Screener
+# bStocks LP Assistant
 
 ## Why this exists
 
 Headline LP APY is compensation for taking on impermanent loss (IL), and IL
 scales with the volatility of the pooled asset. Ranking pools by raw APY
 alone hides how much of that yield is actually paying for risk. This skill
-computes volatility from each stock token's on-chain kline history and nets
-it out of the pool's APY before ranking, using
+computes volatility from each stock token's on-chain kline history, prices
+that risk properly, and nets it out of the pool's APY before ranking, using
 `riskscreen.py` in this directory.
 
 ## When to use
@@ -19,8 +19,11 @@ it out of the pool's APY before ranking, using
 Trigger this skill when the user's request is about:
 - comparing LP pool APYs on tokenized stocks (`…on` Ondo, `…x` xStocks, `…B` bStock)
 - "which LP is actually worth it", "risk-adjusted yield", "波动率调整后的APY"
+- picking a price range for a concentrated (V3) LP position
+- using an LP range to buy/sell a stock token at a target price while earning fees
 - estimating impermanent loss for a specific stock-token pool
 - screening/ranking pools instead of looking at one at a time
+- reviewing current LP positions or asking whether to rebalance
 
 Not for: crypto/crypto LP pairs (the no-correlation-term simplification below
 does not hold there), or any request to actually execute a deposit — that
@@ -29,52 +32,114 @@ still goes through the `binance-agentic-wallet` skill's `defi deposit` /
 
 ## Model
 
-For a constant-product AMM, full-range (V2-style) liquidity, the diffusion
-approximation for expected annual IL is:
+### The scientific comparison: breakeven volatility
+
+Providing full-range constant-product liquidity is mathematically equivalent
+to continuously delta-hedging a **short ATM straddle** — this is a
+well-established DeFi result, and it's the reason the diffusion
+approximation for expected annual IL takes this form:
 
 ```
 E[IL] ≈ σ² / 8
 ```
 
 where `σ` is the stock token's annualized volatility (stdev of daily
-log-returns × √365, from on-chain kline). This works cleanly for stock-token
-pools because they're paired against a stablecoin — no cross-asset
-correlation term is needed. Concentrated (V3) positions amplify realized IL
-above this floor roughly in proportion to how narrow the price range is —
-flag this to the user rather than silently correcting for it (the exact
-amplification factor depends on the chosen range, which is a position-level,
-not pool-level, choice).
-
-Ranking metric:
+log-returns × √365, from on-chain kline). Fee APY is the premium collected
+for selling that volatility. That framing gives a proper "which is more
+worthwhile" comparison across pools with different APY/vol combinations —
+the same one options traders use for "is implied vol cheap or rich versus
+realized":
 
 ```
-net_apy = pool_apy - E[IL]
-score   = net_apy / σ        # return per unit of volatility risk taken
+σ*  (breakeven vol)   = √(8 · apy)          -- the vol at which apy exactly offsets E[IL]
+vol_ratio              = σ_realized / σ*     -- <1: pool pays more than the risk realized
+                                                 (rich premium, good deal)
+                                              -- >1: fee income likely doesn't cover the
+                                                 risk actually observed (cheap premium, bad deal)
 ```
 
-### Range model (concentrated / V3 positions)
+**`vol_ratio` is the primary score** — it's range-independent by
+construction (concentration multiplies fee income and IL by the same
+factor, so it cancels out of the breakeven equation), so it answers "is
+this pool's APY fundamentally well-priced for this token's volatility"
+before you even get to which range to hold it in. `net_apy` (`apy - E[IL]`)
+is still shown alongside as the economically intuitive number, but rank
+primarily on `vol_ratio` when the user is comparing pools with very
+different APY/vol magnitudes — a huge headline APY on an extremely volatile
+token can still have a worse `vol_ratio` than a modest APY on a calmer one.
 
-A concentrated position on `[1-lower%, 1+upper%]` around the current price
-behaves like a leveraged full-range position: both fee income and IL scale
-up by the same Uniswap V3 concentration multiplier `M = 1 / (1 - √(Pa/Pb))`,
-while the pool's reported APY is treated as the full-range-equivalent
-baseline (a stated simplification — the platform doesn't expose per-tick fee
-data, so a pool whose existing LPs are already concentrated will make this
-baseline run a little hot or cold; say so if asked).
+Caveat to surface if asked: realized volatility from a short kline history
+is itself a noisy estimate. Treat a `vol_ratio` computed from under ~30 days
+of history as indicative, not precise — say so rather than presenting it
+with false confidence.
+
+### Range model: market-making vs. single-sided limit orders
+
+A concentrated position on `[Pa, Pb]` (price ratios to current price)
+behaves like a leveraged full-range position: fee income and IL both scale
+by the same Uniswap V3 concentration multiplier `M = 1 / (1 - √(Pa/Pb))`. The
+pool's reported APY is treated as the full-range-equivalent baseline (a
+stated simplification — the platform doesn't expose per-tick fee data).
+
+Two distinct use cases, both handled by `riskscreen.py range --side ...`:
+
+**`--side straddle`** (default) — the range straddles the current price
+(`Pa < 1 < Pb`): ordinary concentrated-liquidity market-making. `p_active`
+is the probability of **never exiting** the range over the period — a
+conservative (safe-direction) union-bound approximation
+(`1 - P(touch Pa) - P(touch Pb)`), since the exact double-barrier
+first-passage probability needs an infinite reflection series. This can
+read `0%` for narrow ranges on volatile tokens even when the true
+no-exit probability is a small positive number — that's the bound being
+loose, not a claim of literal impossibility; say so if a user pushes on a
+`0%` reading.
+
+**`--side sell` / `--side buy`** — the range sits entirely on one side of
+the current price (`Pa ≥ 1` or `Pb ≤ 1`): this is a **yield-enhanced limit
+order**. A sell-side range only starts earning fees (and converting the
+position toward the stable asset) once price rises into the band; a
+buy-side range, once price falls into it. Here `p_active` means something
+different — **the probability the order ever executes at all** (touches
+the near boundary within the period), computed via single-barrier
+first-passage, not the no-exit probability above. Flag this distinction
+explicitly when presenting sided results: p_active for a sell/buy order is
+typically a materially *higher* number than a straddling range of similar
+width, because touching one boundary is much easier than never touching
+either of two.
+
+Known simplification for sided ranges: `net_apy` still reuses the
+IL-vs-50/50-hold formula as a generic "cost of providing liquidity here"
+proxy. It does not yet model the effective average execution price versus a
+plain limit order at `Pb` (sell) / `Pa` (buy) — say so if asked how the
+executed price compares to a vanilla limit order.
 
 ```
-p_stay        = P(price stays in range over 1yr | lognormal, σ, zero drift)
-effective_apy = pool_apy × M × p_stay
-expected_IL   = min(M × σ²/8, IL at the range boundary)   # capped, avoids blow-up on narrow ranges
-net_apy       = effective_apy − expected_IL
+recommended = highest net_apy among candidate ranges with p_active >= 60%
 ```
 
-`range` sweeps `±5/10/20/30/50/90%` plus full-range and recommends the
-highest `net_apy` among ranges with **≥60% chance of staying in range over a
-year** — that 60% floor is the "safety" side of "safe and high APY"; a
-narrower range can show a higher `net_apy` number but at a p_stay so low
-it's misleading to call it "safe". Always show `p_stay` next to any
-recommended range, not just the net_apy figure.
+That 60% floor is the "safety" side of "safe and high APY" — a narrower
+range can show a higher `net_apy` number but at a `p_active` so low it's
+misleading to call it safe. Always show `p_active` next to any recommended
+range, not just the net_apy figure.
+
+## Visualizing results
+
+The end goal is a recommendation the user can act on, not a wall of numbers
+— **prefer a chart over a raw table whenever presenting `scan --with-range`
+or `range` output to the user.** Use the Artifact tool or the visualize
+widget (see the `dataviz` skill for house style) to render:
+
+- **`range` output**: a scatter of `p_active` (x) vs `net_apy` (y) across
+  the candidate ranges, with the recommended point visually distinct
+  (larger marker / accent color, gray for the rest) — this is the
+  safety-vs-yield tradeoff the user is actually deciding between.
+- **`scan` output**: a bar or dot chart of `vol_ratio` across the top
+  pools (lower is better), so "which pool is cheap" reads as a shape, not
+  a column of decimals.
+
+Keep the numeric table in the response text as well (some users want to
+copy the exact figures) — the chart supplements it, it doesn't replace the
+underlying data.
 
 ## Commands
 
@@ -82,20 +147,20 @@ recommended range, not just the net_apy figure.
 # tokenized-stock token list (public API, no auth)
 python riskscreen.py stocks --limit 20 [--type 1|2|3]
 
-# annualized volatility + est. IL for one ticker (public API, no auth)
-python riskscreen.py vol --ticker <TICKER> [--days 30]
+# annualized volatility + est. IL (+ breakeven vol if --apy given) for one ticker (public API, no auth)
+python riskscreen.py vol --ticker <TICKER> [--days 30] [--apy 0.30]
 
-# rank stock-token LP pools by risk-adjusted APY (needs signed-in baw session)
+# rank stock-token LP pools by vol_ratio / net APY (needs signed-in baw session)
 python riskscreen.py scan --top 15 [--json] [--with-range]
 
 # range-by-range IL/APY breakdown + recommended range for one pool
-python riskscreen.py range --investmentId <id>
-python riskscreen.py range --ticker TSLA --apy 0.30   # without a live pool
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # without a live pool
 
 # current LP positions on tokenized-stock pairs (needs signed-in baw session)
 python riskscreen.py positions [--refresh] [--json]
 
-# compare held positions' risk-adjusted score against the current market
+# compare held positions' vol_ratio against the current market
 # (report only — see "Executing a recommendation")
 python riskscreen.py rebalance-check
 ```
@@ -129,10 +194,12 @@ pool and range from this skill's output:
    highlight — use `binance-tokenized-securities-info`'s asset-market-status
    API (earnings/dividend/split can invalidate the historical-vol estimate
    right when it matters most). Mention if one is pending.
-2. **State the approximation**: full-range results use the full-range IL
-   estimate; range results use the concentration-scaled model above. Say
-   which one you're showing.
-3. **Never recommend a deposit outright** — present the ranking/range and
+2. **State which model produced the number**: full-range IL estimate,
+   straddle range (no-exit probability), or sided range (touch/execution
+   probability) — these answer different questions, don't blur them.
+3. **Prefer a chart** over a raw table for `scan`/`range` results — see
+   "Visualizing results" above.
+4. **Never recommend a deposit outright** — present the ranking/range and
    reasoning, let the user decide, and route any actual deposit through the
    confirmed flow in "Executing a recommendation" above.
 

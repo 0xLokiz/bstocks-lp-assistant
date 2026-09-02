@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Risk-adjusted APY screener for Binance Web3 LP pools on tokenized-stock pairs.
+"""bStocks LP Assistant -- volatility-aware LP advisor for Binance Web3 tokenized-stock pools.
 
 LP fee/incentive APY is compensation for impermanent loss (IL), and IL scales
 with the volatility of the pooled assets. This tool re-ranks LP pools by
@@ -7,6 +7,19 @@ APY *net of* an estimated IL cost, so pools aren't compared on headline APY
 alone. Stock-token pools are the clearest case: they're paired against a
 stablecoin, so IL is driven almost entirely by the stock token's own
 volatility (no cross-asset correlation term needed).
+
+Scientific evaluation: LPing (full-range) is mathematically a continuously
+delta-hedged short ATM straddle -- the fee APY is the "premium" you collect
+for selling volatility. This tool computes each pool's *breakeven volatility*
+sigma* (the realized vol at which fee income exactly offsets expected IL) and
+scores pools by sigma_realized / sigma* -- the same "is realized vol richly
+or cheaply priced" comparison options traders make with IV/RV. See
+`breakeven_volatility` / `vol_richness_ratio` below.
+
+Range modes: `range --side straddle` (default) sweeps symmetric market-making
+ranges around the current price. `--side sell` / `--side buy` model a
+concentrated position placed entirely on one side of the current price --
+functionally a limit order that earns fees while it waits to execute.
 
 Data sources (all public, no auth):
   - RWA stock token list / kline: bapi/defi public endpoints (Binance Web3)
@@ -17,7 +30,8 @@ Usage:
   python riskscreen.py stocks --limit 20
   python riskscreen.py vol --ticker TSLA --days 30
   python riskscreen.py scan --top 15
-  python riskscreen.py range --ticker TSLA --apy 0.30
+  python riskscreen.py range --ticker TSLA --apy 0.30 --side straddle
+  python riskscreen.py range --ticker TSLA --apy 0.30 --side sell
   python riskscreen.py positions
   python riskscreen.py rebalance-check
 
@@ -100,11 +114,39 @@ def expected_il_fraction(sigma_annual):
     return (sigma_annual ** 2) / 8
 
 
+def breakeven_volatility(apy):
+    """Volatility at which full-range fee APY exactly offsets expected IL (apy = sigma*^2/8).
+
+    Providing full-range constant-product liquidity is mathematically equivalent to
+    continuously delta-hedging a short ATM straddle -- fee APY is the premium collected
+    for selling volatility. sigma* is the "implied volatility" that premium is pricing in.
+    Concentration multiplies both fee income and IL by the same factor M, so M cancels
+    out of this equation: sigma* is a property of the pool's quoted APY alone, independent
+    of which range you'd choose to hold it in.
+    """
+    return math.sqrt(8 * apy) if apy > 0 else 0.0
+
+
+def vol_richness_ratio(sigma_realized, apy):
+    """sigma_realized / sigma* -- the options-trading-style "is this vol richly priced" ratio.
+
+    <1: the pool pays more than the risk realized volatility implies you should need (rich premium).
+    >1: fee income doesn't cover the volatility risk actually observed (cheap premium, bad deal).
+    This is range-independent by construction -- see breakeven_volatility.
+    """
+    be = breakeven_volatility(apy)
+    if be <= 0:
+        return float("inf") if sigma_realized > 0 else None
+    return sigma_realized / be
+
+
 def risk_adjusted_apy(apy, sigma_annual):
     il = expected_il_fraction(sigma_annual)
     net = apy - il
-    score = net / sigma_annual if sigma_annual > 0 else None
-    return {"apy": apy, "sigma_annual": sigma_annual, "expected_il": il, "net_apy": net, "score": score}
+    return {
+        "apy": apy, "sigma_annual": sigma_annual, "expected_il": il, "net_apy": net,
+        "vol_ratio": vol_richness_ratio(sigma_annual, apy),
+    }
 
 
 def _normal_cdf(x):
@@ -116,61 +158,114 @@ def _il_at_price_ratio(k):
     return 1 - 2 * math.sqrt(k) / (1 + k)
 
 
-def concentration_multiplier(lower_pct, upper_pct):
-    """Capital-efficiency multiplier of a [1-lower_pct, 1+upper_pct] range vs full range (Uniswap V3 math)."""
-    pa, pb = 1 - lower_pct, 1 + upper_pct
+def concentration_multiplier(pa, pb):
+    """Capital-efficiency multiplier of range [pa, pb] (price ratios to current price) vs
+    full range -- Uniswap V3 math. Works for any 0 < pa < pb, straddling the current price
+    (pa < 1 < pb) or entirely on one side of it (pa >= 1 or pb <= 1)."""
     denom = 1 - math.sqrt(pa / pb)
     return 1 / denom if denom > 1e-9 else float("inf")
 
 
-def stay_in_range_probability(lower_pct, upper_pct, sigma_annual, years=1.0):
-    """P(price stays within [1-lower_pct, 1+upper_pct]) under zero-drift lognormal diffusion."""
-    pa, pb = 1 - lower_pct, 1 + upper_pct
+def _single_barrier_touch_probability(barrier_ratio, sigma_annual, years=1.0):
+    """P(a driftless lognormal price ever crosses barrier_ratio = barrier/P0 within [0,T]),
+    via the reflection principle."""
+    if barrier_ratio <= 0:
+        return 1.0
     s = sigma_annual * math.sqrt(years)
     if s <= 0:
-        return 1.0
-    d_low = math.log(pa) / s
-    d_high = math.log(pb) / s
-    return _normal_cdf(d_high) - _normal_cdf(d_low)
+        return 0.0
+    a = abs(math.log(barrier_ratio)) / s
+    return 2 * (1 - _normal_cdf(a))
 
 
-def range_adjusted_metrics(pool_apy, sigma_annual, lower_pct, upper_pct, years=1.0):
-    """Range-adjusted fee APY / IL / net APY, approximating the pool's reported APY as a
-    full-range-equivalent baseline (see README/SKILL.md caveat: the platform doesn't expose
-    per-tick fee data, so this scales a blended pool APY rather than a true full-range rate).
+def no_exit_probability(pa, pb, sigma_annual, years=1.0):
+    """Conservative probability that price stays within [pa, pb] for the *entire* period
+    (not just the endpoint), via a first-order union-bound approximation:
+    1 - P(touch pa) - P(touch pb). Exact double-barrier first-passage needs an infinite
+    reflection series; this approximation is safe-direction (slightly understates the true
+    no-exit probability) as long as the two barriers aren't very close together -- appropriate
+    for a "safety floor" metric, where understating safety is the conservative error to make.
     """
-    if lower_pct >= 1 or upper_pct <= -1:
-        raise ValueError("range must keep price positive")
-    m = concentration_multiplier(lower_pct, upper_pct)
-    p_stay = stay_in_range_probability(lower_pct, upper_pct, sigma_annual, years)
-    effective_apy = pool_apy * m * p_stay
+    p_low = _single_barrier_touch_probability(pa, sigma_annual, years)
+    p_high = _single_barrier_touch_probability(pb, sigma_annual, years)
+    return max(0.0, 1 - p_low - p_high)
+
+
+def range_metrics(pool_apy, sigma_annual, pa, pb, years=1.0):
+    """Range-adjusted fee APY / IL / net APY for range [pa, pb] (price ratios to current
+    price = 1.0), approximating the pool's reported APY as a full-range-equivalent baseline
+    (the platform doesn't expose per-tick fee data, so this scales a blended pool APY rather
+    than a true full-range rate -- see README/SKILL.md caveat).
+
+    Straddling ranges (pa < 1 < pb) are market-making: `mode="market_making"`, `p_active` is
+    the probability of never exiting the range (the "safety" of collecting fees the whole
+    period). Single-sided ranges (pa >= 1 or pb <= 1) are yield-enhanced limit orders:
+    `mode="sell_limit"`/`"buy_limit"`, `p_active` is the probability the order ever executes
+    at all (touches the near boundary) -- a different question, and typically a materially
+    higher number than an equivalent-width straddling range's stay-probability.
+
+    Known simplification: for single-sided ranges the `expected_il` figure still uses the
+    IL-vs-50/50-hold formula, which isn't quite the right comparison for a position that
+    starts 100% in one asset. Treat it as a generic "cost of providing liquidity here" proxy,
+    not a precise "execution price vs a plain limit order" model -- that refinement is not
+    yet implemented.
+    """
+    if pa <= 0 or pb <= pa:
+        raise ValueError("need 0 < pa < pb")
+    m = concentration_multiplier(pa, pb)
+    straddle = pa < 1 < pb
+    if straddle:
+        mode = "market_making"
+        p_active = no_exit_probability(pa, pb, sigma_annual, years)
+    else:
+        mode = "sell_limit" if pa >= 1 else "buy_limit"
+        near_barrier = pa if pa >= 1 else pb
+        p_active = _single_barrier_touch_probability(near_barrier, sigma_annual, years)
+    effective_apy = pool_apy * m * p_active
     il_diffusion = m * (sigma_annual ** 2) * years / 8
-    il_boundary = max(_il_at_price_ratio(1 - lower_pct), _il_at_price_ratio(1 + upper_pct))
+    il_boundary = max(_il_at_price_ratio(pa), _il_at_price_ratio(pb))
     expected_il = min(il_diffusion, il_boundary)
     net_apy = effective_apy - expected_il
-    sigma_effective = sigma_annual * math.sqrt(m)
-    score = net_apy / sigma_effective if sigma_effective > 0 else None
     return {
-        "lower_pct": lower_pct, "upper_pct": upper_pct, "concentration": m,
-        "p_stay_in_range": p_stay, "effective_apy": effective_apy,
-        "expected_il": expected_il, "net_apy": net_apy, "score": score,
+        "pa": pa, "pb": pb, "mode": mode, "concentration": m, "p_active": p_active,
+        "effective_apy": effective_apy, "expected_il": expected_il, "net_apy": net_apy,
+        "vol_ratio": vol_richness_ratio(sigma_annual, pool_apy),
     }
 
 
-DEFAULT_RANGE_WIDTHS = [0.05, 0.10, 0.20, 0.30, 0.50, 0.90]
-SAFETY_P_STAY_FLOOR = 0.6
+DEFAULT_STRADDLE_WIDTHS = [0.05, 0.10, 0.20, 0.30, 0.50, 0.90]
+DEFAULT_SIDED_OFFSETS = [0.05, 0.10, 0.20, 0.30, 0.50]
+SIDED_BAND_WIDTH = 0.10
+SAFETY_P_ACTIVE_FLOOR = 0.6
 
 
-def recommend_range(pool_apy, sigma_annual, widths=None, years=1.0):
-    widths = widths or DEFAULT_RANGE_WIDTHS
-    rows = [range_adjusted_metrics(pool_apy, sigma_annual, w, w, years) for w in widths]
-    full_range = risk_adjusted_apy(pool_apy, sigma_annual)
-    rows.append({
-        "lower_pct": None, "upper_pct": None, "concentration": 1.0, "p_stay_in_range": 1.0,
-        "effective_apy": pool_apy, "expected_il": full_range["expected_il"],
-        "net_apy": full_range["net_apy"], "score": full_range["score"],
-    })
-    safe = [r for r in rows if r["p_stay_in_range"] >= SAFETY_P_STAY_FLOOR]
+def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0):
+    """Sweep a set of candidate ranges and recommend the one with the highest net_apy among
+    those meeting the SAFETY_P_ACTIVE_FLOOR probability floor. `side`: "straddle" (default,
+    symmetric market-making ranges around the current price), "sell" (single-sided ranges
+    above current price -- a limit-sell-style order), or "buy" (single-sided ranges below --
+    a limit-buy-style order)."""
+    rows = []
+    if side == "straddle":
+        for w in DEFAULT_STRADDLE_WIDTHS:
+            rows.append(range_metrics(pool_apy, sigma_annual, 1 - w, 1 + w, years))
+        il = expected_il_fraction(sigma_annual)
+        rows.append({
+            "pa": None, "pb": None, "mode": "market_making", "concentration": 1.0,
+            "p_active": 1.0, "effective_apy": pool_apy, "expected_il": il,
+            "net_apy": pool_apy - il, "vol_ratio": vol_richness_ratio(sigma_annual, pool_apy),
+        })
+    elif side == "sell":
+        for offset in DEFAULT_SIDED_OFFSETS:
+            rows.append(range_metrics(pool_apy, sigma_annual, 1 + offset, 1 + offset + SIDED_BAND_WIDTH, years))
+    elif side == "buy":
+        for offset in DEFAULT_SIDED_OFFSETS:
+            pb = 1 - offset
+            pa = max(pb - SIDED_BAND_WIDTH, 0.01)
+            rows.append(range_metrics(pool_apy, sigma_annual, pa, pb, years))
+    else:
+        raise ValueError(f"unknown side {side!r}")
+    safe = [r for r in rows if r["p_active"] >= SAFETY_P_ACTIVE_FLOOR]
     best = max(safe or rows, key=lambda r: r["net_apy"])
     return rows, best
 
@@ -260,8 +355,10 @@ def cmd_vol(args):
             print(f"{t['symbol']} (chain {t['chainId']}): not enough kline history")
             continue
         il = expected_il_fraction(sigma)
+        be = breakeven_volatility(args.apy) if args.apy else None
+        be_str = f", breakeven vol @ {args.apy*100:.0f}% APY = {be*100:.2f}%" if be else ""
         print(f"{t['symbol']} (chain {t['chainId']}): annualized vol = {sigma*100:.2f}%, "
-              f"est. full-range IL/yr = {il*100:.2f}%")
+              f"est. full-range IL/yr = {il*100:.2f}%{be_str}")
 
 
 def cmd_scan(args):
@@ -336,33 +433,40 @@ def cmd_scan(args):
             **scored,
         }
         if args.with_range:
-            _, best = recommend_range(apy, sigma)
+            _, best = recommend_range(apy, sigma, side="straddle")
             result["best_range"] = best
         results.append(result)
 
     results.sort(key=lambda r: r["net_apy"], reverse=True)
 
     if args.with_range:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}"
-              f"{'full-net':>10}{'best +/-%':>10}{'range-net':>11}{'p_stay':>8}{'tvl':>14}")
+        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'vol_ratio':>10}"
+              f"{'full-net':>10}{'best +/-%':>10}{'range-net':>11}{'p_active':>10}{'tvl':>14}")
         for r in results[: args.top]:
             b = r["best_range"]
-            width = f"{b['upper_pct']*100:.0f}%" if b["upper_pct"] is not None else "full"
+            width = f"{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full"
+            vr = f"{r['vol_ratio']:.2f}" if r["vol_ratio"] is not None else "n/a"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
-                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
+                  f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{vr:>10}"
                   f"{r['net_apy']*100:>9.2f}%{width:>10}"
-                  f"{b['net_apy']*100:>10.2f}%{b['p_stay_in_range']*100:>7.0f}%"
+                  f"{b['net_apy']*100:>10.2f}%{b['p_active']*100:>9.0f}%"
                   f"{r['tvl']:>14,.0f}")
-        print("\n('best +/-%' = recommended symmetric range width; 'range-net' assumes an LP "
+        print("\n('vol_ratio' = realized vol / breakeven vol -- <1 means the pool pays more "
+              "than the realized risk implies, the 'scientifically cheap' signal; "
+              "'best +/-%' = recommended symmetric range width; 'range-net' assumes an LP "
               "actively holding that range; run `range --investmentId <id>` for the full "
-              "width-by-width breakdown on one pool.)")
+              "width-by-width breakdown, or `--side sell/buy` for single-sided limit-order-style "
+              "ranges, on one pool.)")
     else:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'est.IL':>9}{'net_apy':>10}{'score':>8}{'tvl':>14}")
+        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'est.IL':>9}{'net_apy':>10}{'vol_ratio':>10}{'tvl':>14}")
         for r in results[: args.top]:
+            vr = f"{r['vol_ratio']:.2f}" if r["vol_ratio"] is not None else "n/a"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['expected_il']*100:>8.2f}%"
-                  f"{r['net_apy']*100:>9.2f}%{r['score'] if r['score'] is not None else 0:>8.2f}"
+                  f"{r['net_apy']*100:>9.2f}%{vr:>10}"
                   f"{r['tvl']:>14,.0f}")
+        print("\n('vol_ratio' = realized vol / breakeven vol, the pool's own is-it-cheap "
+              "signal, independent of what range you'd hold it in -- see README.)")
 
     if args.json:
         print(json.dumps(results[: args.top], indent=2))
@@ -403,19 +507,44 @@ def cmd_range(args):
         print("not enough kline history to estimate volatility", file=sys.stderr)
         sys.exit(1)
 
-    rows, best = recommend_range(apy, sigma)
-    print(f"{label} -- annualized vol {sigma*100:.2f}%\n")
-    print(f"{'range':>10}{'concentration':>14}{'p_stay':>8}{'eff.apy':>10}{'est.IL':>9}{'net_apy':>10}{'score':>8}")
-    for r in rows:
-        width = f"+/-{r['upper_pct']*100:.0f}%" if r["upper_pct"] is not None else "full"
-        marker = "  <- recommended" if r is best else ""
-        print(f"{width:>10}{r['concentration']:>14.2f}{r['p_stay_in_range']*100:>7.0f}%"
-              f"{r['effective_apy']*100:>9.2f}%{r['expected_il']*100:>8.2f}%"
-              f"{r['net_apy']*100:>9.2f}%{r['score'] if r['score'] is not None else 0:>8.2f}{marker}")
-    print(f"\n(recommended = highest net_apy among ranges with >={SAFETY_P_STAY_FLOOR*100:.0f}% "
-          f"chance of staying in range over 1yr -- that's the 'safety' floor. Narrower ranges "
-          f"earn more fee APY per dollar but exit the range more often, at which point they stop "
-          f"earning fees entirely until rebalanced.)")
+    vol_ratio = vol_richness_ratio(sigma, apy)
+    vr_str = f"{vol_ratio:.2f}" if vol_ratio is not None else "n/a"
+    verdict = "richly priced (pays more than realized risk)" if (vol_ratio is not None and vol_ratio < 1) \
+        else "cheaply priced (fee income may not cover realized risk)"
+    print(f"{label} -- annualized vol {sigma*100:.2f}%")
+    print(f"breakeven vol (sigma*) {breakeven_volatility(apy)*100:.2f}%  |  "
+          f"vol_ratio (realized/breakeven) = {vr_str}  ->  {verdict}")
+    print("(vol_ratio is range-independent -- it's a property of this pool's APY vs the "
+          "token's own volatility, not of which range below you'd pick.)\n")
+
+    rows, best = recommend_range(apy, sigma, side=args.side)
+    if args.side == "straddle":
+        print(f"{'range':>10}{'concentration':>14}{'p_stay':>8}{'eff.apy':>10}{'est.IL':>9}{'net_apy':>10}")
+        for r in rows:
+            width = f"+/-{(r['pb']-1)*100:.0f}%" if r["pb"] is not None else "full"
+            marker = "  <- recommended" if r is best else ""
+            print(f"{width:>10}{r['concentration']:>14.2f}{r['p_active']*100:>7.0f}%"
+                  f"{r['effective_apy']*100:>9.2f}%{r['expected_il']*100:>8.2f}%"
+                  f"{r['net_apy']*100:>9.2f}%{marker}")
+        print(f"\n(recommended = highest net_apy among ranges with >={SAFETY_P_ACTIVE_FLOOR*100:.0f}% "
+              f"chance of staying in range over 1yr -- that's the 'safety' floor. Narrower ranges "
+              f"earn more fee APY per dollar but exit the range more often, at which point they stop "
+              f"earning fees entirely until rebalanced.)")
+    else:
+        verb = "rises to" if args.side == "sell" else "falls to"
+        print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'p_execute':>10}{'eff.apy':>10}{'net_apy':>10}")
+        for r in rows:
+            offset_pct = abs((r["pa"] if args.side == "sell" else r["pb"]) - 1) * 100
+            band = f"[{r['pa']:.2f}, {r['pb']:.2f}]x"
+            marker = "  <- recommended" if r is best else ""
+            print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{r['p_active']*100:>9.0f}%"
+                  f"{r['effective_apy']*100:>9.2f}%{r['net_apy']*100:>9.2f}%{marker}")
+        print(f"\n(this places a concentrated range entirely {'above' if args.side == 'sell' else 'below'} "
+              f"the current price -- a yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order: "
+              f"it only earns fees once price {verb} the band, and 'p_execute' is the probability "
+              f"that ever happens within a year. Known simplification: 'net_apy' still uses the "
+              f"IL-vs-hold formula as a generic liquidity-cost proxy, not a precise effective-execution-"
+              f"price model -- see SKILL.md.)")
 
 
 def cmd_positions(args):
@@ -450,10 +579,12 @@ def cmd_rebalance_check(args):
     market = fetch_lp_investments()
     market_by_id = {m["investmentId"]: m for m in market}
 
-    print(f"\n{'held pool (ticker)':<28}{'current score':>15}{'best market score':>20}{'gap':>10}")
+    print(f"\n{'held pool (ticker)':<28}{'held vol_ratio':>16}{'best market vol_ratio':>24}{'gap':>10}")
+    print("(vol_ratio = realized vol / breakeven vol -- lower is better; a held position with a "
+          "notably higher ratio than the best market option is the one worth reconsidering)\n")
     for h in held:
         inv_ids = h["investmentIds"] or []
-        held_score = None
+        held_ratio = None
         for inv_id in inv_ids:
             m = market_by_id.get(inv_id)
             if not m:
@@ -466,7 +597,7 @@ def cmd_rebalance_check(args):
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
             sigma = annualized_volatility(klines)
             if sigma:
-                held_score = risk_adjusted_apy(apy, sigma)["score"]
+                held_ratio = vol_richness_ratio(sigma, apy)
             break
 
         candidates = []
@@ -481,15 +612,17 @@ def cmd_rebalance_check(args):
             klines = fetch_klines(h["stock"]["chainId"], h["stock"]["contractAddress"], limit=91)
             sigma = annualized_volatility(klines)
             if sigma and sigma > 0:
-                candidates.append(risk_adjusted_apy(apy, sigma)["score"])
+                r = vol_richness_ratio(sigma, apy)
+                if r is not None:
+                    candidates.append(r)
             time.sleep(0.1)
-        best_market_score = max(candidates) if candidates else None
+        best_market_ratio = min(candidates) if candidates else None
 
         label = f"{h['protocolName']} ({h['stock']['ticker']})"
-        hs = f"{held_score:.2f}" if held_score is not None else "n/a"
-        bs = f"{best_market_score:.2f}" if best_market_score is not None else "n/a"
-        gap = f"{best_market_score - held_score:+.2f}" if held_score is not None and best_market_score is not None else "n/a"
-        print(f"{label:<28}{hs:>15}{bs:>20}{gap:>10}")
+        hs = f"{held_ratio:.2f}" if held_ratio is not None else "n/a"
+        bs = f"{best_market_ratio:.2f}" if best_market_ratio is not None else "n/a"
+        gap = f"{held_ratio - best_market_ratio:+.2f}" if held_ratio is not None and best_market_ratio is not None else "n/a"
+        print(f"{label:<28}{hs:>16}{bs:>24}{gap:>10}")
 
     print("\nThis is a recommendation only -- nothing was moved. To act on a suggestion, use "
           "`baw defi redeem` / `defi lp-remove` then `defi deposit` / `defi lp-add` via the "
@@ -508,6 +641,7 @@ def main():
     p_vol = sub.add_parser("vol", help="compute annualized volatility + est. IL for one ticker")
     p_vol.add_argument("--ticker", required=True)
     p_vol.add_argument("--days", type=int, default=30)
+    p_vol.add_argument("--apy", type=float, default=None, help="optional: also show breakeven vol at this pool APY (0.30 = 30%%)")
     p_vol.set_defaults(func=cmd_vol)
 
     p_scan = sub.add_parser("scan", help="rank stock-token LP pools by risk-adjusted (net of IL) APY")
@@ -521,6 +655,8 @@ def main():
     p_range.add_argument("--investmentId", dest="investment_id", help="pull live apy/ticker for this pool")
     p_range.add_argument("--ticker", help="alternative to --investmentId: stock ticker")
     p_range.add_argument("--apy", type=float, help="alternative to --investmentId: pool APY as a decimal (0.30 = 30%%)")
+    p_range.add_argument("--side", choices=["straddle", "sell", "buy"], default="straddle",
+                          help="straddle=symmetric market-making (default), sell/buy=single-sided limit-order-style range")
     p_range.set_defaults(func=cmd_range)
 
     p_positions = sub.add_parser("positions", help="show current LP positions on tokenized-stock pairs")

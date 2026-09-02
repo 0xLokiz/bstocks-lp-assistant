@@ -1,21 +1,35 @@
-# LP Risk Screener
+# bStocks LP Assistant
 
-A volatility-aware LP advisor for Binance Web3 tokenized-stock pools. Four
-parts:
+A volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks)
+pools — built entirely on the **Binance MCP / Agent OS framework**: Binance's
+Web3 market-data APIs plus the Agentic Wallet (`baw`) MCP/CLI surface, no
+other data source or execution path.
+
+## Built on Binance MCP — module by module
+
+| # | Capability | Binance Agent OS module used |
+|---|---|---|
+| 1 | **Pull market data** via Binance's MCP/API | Binance Web3 APIs — public RWA stock-token list + on-chain kline (no auth) |
+| 2 | **Compute IL/APY across price ranges from volatility, and recommend a deposit** — how to get a *safe and high* APY | This project's model (`riskscreen.py`): breakeven-volatility scoring + range sweep (see "The idea" below) |
+| 3 | **Operate deposits/withdrawals directly** via Agentic Wallet | `binance-agentic-wallet`'s confirmed `defi deposit` / `defi lp-add` / `defi redeem` / `defi lp-remove` — this project hands off to it rather than reimplementing execution |
+| 4 | **Read the global investment picture** via Agentic Wallet | `baw defi position` — held LP positions, filtered to tokenized-stock pairs |
+
+Four parts, concretely:
 
 1. **Market data** — pulls stock-token prices/kline and LP pool APY/TVL/composition
    straight from Binance's Web3 APIs and the Agentic Wallet (`baw`) CLI.
 2. **Risk-adjusted recommendation** — computes impermanent-loss cost from
    volatility, at both full-range and a swept set of concentrated-liquidity
-   ranges, and recommends the range that's actually "safe and high APY"
-   rather than just high APY.
+   ranges (symmetric market-making, or single-sided limit-order-style
+   ranges), scores pools by a breakeven-volatility ratio, and recommends the
+   range that's actually "safe and high APY" rather than just high APY.
 3. **Execution** — deliberately *not* reimplemented here. Deposits/withdrawals
    go through `binance-agentic-wallet`'s already-reviewed, confirmation-gated
    `defi deposit` / `defi lp-add` / `defi redeem` / `defi lp-remove` flow,
    using the `investmentId` and token addresses this tool surfaces.
 4. **Portfolio + rebalance checks** — reads current LP positions via `baw defi
-   position` and compares their risk-adjusted score against the live market,
-   producing a report (never an auto-executed trade — see below).
+   position` and compares their vol_ratio against the live market, producing
+   a report (never an auto-executed trade — see below).
 
 **New here?** See [INSTALL.md](INSTALL.md) for how to add this to your own
 Claude + Agent OS setup and use it conversationally, with no command-line
@@ -38,52 +52,90 @@ E[IL] ≈ σ² / 8      (annualized, full-range / V2-style liquidity)
 where `σ` is the token's annualized volatility, estimated from its on-chain
 kline history (log-return stdev, annualized by `sqrt(365)`).
 
-The screener then ranks pools by:
+### The scientific comparison: breakeven volatility
+
+Full-range LPing is mathematically equivalent to continuously delta-hedging
+a **short ATM straddle** — fee APY is the premium collected for selling
+volatility. That gives a proper way to answer "under different volatility
+and APY combinations, which pool is actually more worthwhile" — the same
+question options traders ask about implied vol vs. realized vol:
 
 ```
-net_apy = pool_apy - E[IL]
-score   = net_apy / σ          (Sharpe-like, return per unit of risk taken)
+σ* (breakeven vol) = √(8 · apy)         -- the vol at which apy exactly offsets E[IL]
+vol_ratio           = σ_realized / σ*    -- <1: pool pays more than the realized risk (rich, good deal)
+                                          -- >1: fee income likely doesn't cover the realized risk (cheap, bad deal)
 ```
 
-A pool with a flashy headline APY on a highly volatile stock token can rank
-*below* a lower-APY pool on a stable stock token once IL is priced in.
+`vol_ratio` is **range-independent** — concentration multiplies fee income
+and IL by the same factor, so it cancels out of the breakeven equation. It's
+a property of the pool's own APY vs. the token's volatility, not of which
+range you'd choose to hold it in — a much more apples-to-apples comparison
+across pools with wildly different APY/vol magnitudes than a raw APY
+ranking, or even the plain `net_apy` figure alone.
 
-### Concentrated (V3) ranges: the "safe and high APY" question
+### Concentrated (V3) ranges: market-making vs. limit orders
 
-A concentrated position on `[1-a%, 1+b%]` behaves like a leveraged full-range
+A concentrated position on `[Pa, Pb]` behaves like a leveraged full-range
 position — fee income *and* IL both scale by the same Uniswap V3
-concentration multiplier `M = 1 / (1 - √(Pa/Pb))`. Narrower range → higher M
-→ higher APY *and* higher realized IL *and* a higher chance the price exits
-the range entirely (at which point the position earns zero fees until
-rebalanced). The tool sweeps `±5/10/20/30/50/90%` plus full-range and picks
-the highest `net_apy` among ranges with **≥60% probability of staying in
-range over a year** — that's the "safe" floor; "high APY" is the search
-inside it. Both numbers are always shown together, never the APY alone.
+concentration multiplier `M = 1 / (1 - √(Pa/Pb))`.
 
-## Caveats (read before trusting the ranking)
+- **Straddling range** (`Pa < 1 < Pb`, the default): ordinary
+  market-making. `p_active` = probability of never exiting the range over
+  the period (a conservative union-bound approximation).
+- **Single-sided range** (`Pa ≥ 1` or `Pb ≤ 1`): a **yield-enhanced limit
+  order** — a sell-side range only converts toward the stable asset (and
+  earns fees) once price rises into it; a buy-side range, once price falls
+  into it. `p_active` here means *probability the order ever executes*,
+  computed as a single-barrier touch probability — a different, and
+  typically higher, number than the straddling case's no-exit probability.
+
+The tool sweeps a set of candidate ranges/offsets per side and recommends
+the highest `net_apy` among those with **≥60% chance of being active over a
+year** — that 60% floor is the "safety" side of "safe and high APY"; a
+narrower range can show a higher `net_apy` number but at a `p_active` so low
+it's misleading to call it "safe". Both numbers are always shown together,
+never the APY alone.
+
+## Caveats (read before trusting the numbers)
 
 - **Historical vol is backward-looking.** Stock tokens can gap hard around
   earnings, dividends, splits, and trading halts — check
   `binance-tokenized-securities-info`'s asset-market-status API for upcoming
-  corporate actions on any pool you're about to enter.
-- **Full-range approximation.** Concentrated (V3-style) LP positions
-  amplify realized IL versus this full-range estimate, roughly in proportion
-  to how narrow the price range is. Treat `E[IL]` here as a floor, not a
-  prediction, for concentrated positions.
-- **No drift term.** The formula assumes zero expected price drift. It's a
-  volatility-risk estimate, not a directional forecast.
+  corporate actions on any pool you're about to enter. A `vol_ratio` from a
+  short kline history is a noisy estimate, not a precise number.
+- **The straddle no-exit probability is a loose, conservative bound** — it
+  can read `0%` for narrow ranges even when the true probability is a small
+  positive number. That's the union-bound approximation being loose, not a
+  claim of literal impossibility.
+- **Sided (limit-order) ranges reuse the IL-vs-hold formula as a generic
+  cost proxy** — it does not yet model the effective average execution
+  price versus a plain limit order at the boundary. A known simplification,
+  not hidden.
+- **No drift term.** All formulas assume zero expected price drift. This is
+  a volatility-risk estimate, not a directional forecast.
+
+## Visualizing results
+
+When used through Claude, results are shown as a chart (safety-vs-yield
+scatter for `range`, a vol_ratio comparison for `scan`), not just a raw
+table — see `SKILL.md` → "Visualizing results". Example, from live NVDAB-USDT
+data:
+
+*(chart: p_active on the x-axis, net_apy on the y-axis, one point per
+candidate range, the recommended ±50% range highlighted — see the skill in
+action inside a Claude session for the rendered version)*
 
 ## Usage
 
 ```bash
 # --- market data (public API, no auth) ---
 python riskscreen.py stocks --limit 20 --type 1
-python riskscreen.py vol --ticker TSLA --days 30
+python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- recommendation (needs a signed-in `baw` session) ---
 python riskscreen.py scan --top 15 [--with-range] [--json]
-python riskscreen.py range --investmentId <id>          # full range sweep, one pool
-python riskscreen.py range --ticker TSLA --apy 0.30      # or without a live pool
+python riskscreen.py range --investmentId <id> [--side straddle|sell|buy]
+python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # or without a live pool
 
 # --- portfolio + rebalance (needs a signed-in `baw` session) ---
 python riskscreen.py positions [--refresh] [--json]
@@ -106,69 +158,32 @@ deposit` / `defi lp-add` / `defi redeem` / `defi lp-remove`, using the
 ## Status
 
 Validated end-to-end against a live `baw` session. Live output
-(`python riskscreen.py scan --top 10`, BSC, 2026-09-02):
+(`python riskscreen.py scan --top 8 --with-range`, BSC, 2026-09-02):
 
 ```
-pool                ticker        apy      vol   est.IL   net_apy   score           tvl
-GMEB-USDT           GME       452.84%   23.72%    0.70%   452.14%   19.06        18,448
-AAPLB-USDT          AAPL      382.75%   32.62%    1.33%   381.42%   11.69        52,527
-GMEB-USDT           GME       296.20%   23.72%    0.70%   295.50%   12.46       137,303
-AAPLB-USDT          AAPL      230.28%   32.62%    1.33%   228.95%    7.02       431,446
-NVDAB-BNB           NVDA      123.94%   39.37%    1.94%   122.00%    3.10        42,681
-BNB-SPCXB           SPCX      125.01%   82.80%    8.57%   116.44%    1.41     1,339,931
-HOODB-BNB           HOOD      112.87%   71.89%    6.46%   106.41%    1.48        17,274
-NVDAB-USDT          NVDA      101.83%   39.37%    1.94%    99.89%    2.54        67,277
-USDT-TSLAB          TSLA       97.97%   51.04%    3.26%    94.71%    1.86       319,066
-USDT-HOODB          HOOD       95.10%   71.89%    6.46%    88.64%    1.23       161,799
+pool                ticker        apy      vol vol_ratio  full-net best +/-%  range-net  p_active           tvl
+GMEB-USDT           GME       452.84%   23.73%      0.04   452.14%       50%    972.27%       91%        19,879
+AAPLB-USDT          AAPL      382.75%   32.64%      0.06   381.42%       50%    677.91%       75%        53,012
+GMEB-USDT           GME       296.20%   23.73%      0.05   295.50%       50%    635.38%       91%       137,657
+AAPLB-USDT          AAPL      230.28%   32.64%      0.08   228.95%       50%    406.61%       75%       438,462
+NVDAB-BNB           NVDA      123.94%   39.58%      0.13   121.98%       50%    175.56%       61%        42,844
+BNB-SPCXB           SPCX      125.01%   82.79%      0.26   116.44%      full    116.44%      100%     1,295,426
+HOODB-BNB           HOOD      112.87%   71.76%      0.24   106.43%      full    106.43%      100%        17,221
+NVDAB-USDT          NVDA      101.83%   39.58%      0.14    99.87%       50%    143.42%       61%        67,394
 ```
 
-**Finding along the way**: `defi investment-list`'s `apy` field is `null`/`0`
-for essentially all concentrated-liquidity (V3) pools — it only reflects
-promotional/reward APY, which most of these pools don't currently have.
-The real fee-based rate lives in `investment-info`'s `apyBps` /
-`apyDisplay`, which the screener now falls back to per pool. Ranking on the
-list-level `apy` alone (our first pass) would have shown every stock-token
-V3 pool as a straight loser once IL is priced in — which happened to look
-plausible, but was actually a data-plumbing bug, not a real result. Worth
-remembering: don't trust a "the risk-adjusted number is always negative"
-result without checking whether the raw input was actually populated.
+All eight of these top pools show `vol_ratio` well under 1 (0.04–0.26) —
+confirming the huge headline APYs genuinely reflect a large premium over
+realized volatility, not just an artifact of reading raw APY numbers.
 
-**Reading the live numbers**: pools also matched by exact on-chain
-`assetTokenList` address (not just name-string matching), so `stock_ticker`
-here is confirmed, not guessed. The very high scores at the top (GMEB-USDT,
-AAPLB-USDT) sit on pools with comparatively small TVL — consistent with
-tight concentrated-liquidity ranges, which earn outsized fee APY *and* carry
-IL well above this screener's full-range floor. That's the SKILL.md caveat
-showing up in real data, not a free-lunch signal.
-
-Range sweep for one of those pools (`python riskscreen.py range
---investmentId 9c97...c907c22d405de7ec7f79d` — NVDAB-USDT on PancakeSwap V3):
-
-```
-NVDAB-USDT (NVDA) -- annualized vol 39.50%
-
-     range concentration  p_stay   eff.apy   est.IL   net_apy   score
-     +/-5%         20.49     10%   116.67%    0.03%   116.63%    0.65
-    +/-10%         10.47     20%   118.63%    0.14%   118.49%    0.93
-    +/-20%          5.45     39%   120.58%    0.62%   119.97%    1.30
-    +/-30%          3.76     56%   119.56%    1.57%   117.99%    1.54
-    +/-50%          2.37     81%   107.98%    4.61%   103.37%    1.70  <- recommended
-    +/-90%          1.30     95%    69.48%    2.53%    66.95%    1.49
-      full          1.00    100%    56.48%    1.95%    54.53%    1.38
-```
-
-The full-range headline APY on this pool is 56.48%. The tool's recommended
-range (±50%, 81% chance of staying in range over a year) nearly doubles that
-to 103.37% net — without dropping into the sub-20%-p_stay territory where the
-±5–10% rows post even bigger numbers that are really lottery tickets, not
-yield. This is the concrete answer to "how do I get a safe *and* high APY":
-not the highest number on the sheet, the highest number above the safety
-floor.
-
-`positions` / `rebalance-check` ran clean against the live (currently empty)
-wallet — both report "no LP positions on tokenized-stock pairs found" rather
-than erroring, and will start producing real comparisons the moment a
-position exists.
+Range sweep for NVDAB-USDT (`range --investmentId 9c97dee1...d405de7ec7f79d`):
+breakeven vol 212.57% vs. realized 39.58% (`vol_ratio` 0.19, richly priced).
+Full-range nets 54.51% APY; the recommended ±50% range (61% probability of
+never exiting over a year — the "safety" floor) nets 77.48%. A single-sided
+`--side sell` sweep on the same pool shows a tight ±5%-above-price band with
+90% probability of ever executing and a >1000% net APY while active — the
+"use an LP range as a limit sell order" case point 1 in the iteration list
+asked for.
 
 ## Binance Agent OS Mini Hackathon — Track A submission
 
@@ -186,6 +201,7 @@ Agent OS. Maps directly onto Agent OS's own pillars
 
 The pitch: turn "what's the LP APY" into "what's the LP APY *worth taking
 the risk for, and at what range*" — a volatility-aware advisor that treats
-stock-token LPing as the market-making activity it actually is, recommends a
-concrete range instead of a vague "APY looks good", and stays in an advisory
-role — every fund movement is still a human-confirmed `baw` call.
+stock-token LPing as the market-making (or limit-order) activity it actually
+is, scores pools the way an options desk would price a straddle, recommends
+a concrete range instead of a vague "APY looks good", and stays in an
+advisory role — every fund movement is still a human-confirmed `baw` call.

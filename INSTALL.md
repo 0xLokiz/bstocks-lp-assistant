@@ -1,4 +1,4 @@
-# Installing & Using This Skill
+# Installing & Using bStocks LP Assistant
 
 This guide is for someone who already has **Claude connected to Binance
 Agent OS** — i.e. the `baw` (Binance Agentic Wallet) CLI is installed and
@@ -22,17 +22,17 @@ itself.
 Skills live in `~/.claude/skills/<skill-name>/` and Claude discovers them
 automatically. The simplest way to install this one is to just ask Claude:
 
-> "帮我装一下 https://github.com/0xLokiz/lp-risk-screener 这个 skill"
-> ("help me install this skill: https://github.com/0xLokiz/lp-risk-screener")
+> "帮我装一下 https://github.com/0xLokiz/bstocks-lp-assistant 这个 skill"
+> ("help me install this skill: https://github.com/0xLokiz/bstocks-lp-assistant")
 
 Claude will confirm before doing anything (same pattern as installing any
 other Binance skill, e.g. `query-token-info`), then clone this repo's
-`SKILL.md` + `riskscreen.py` into `~/.claude/skills/lp-risk-screener/`.
+`SKILL.md` + `riskscreen.py` into `~/.claude/skills/bstocks-lp-assistant/`.
 
 Manual install works too, if you'd rather do it yourself:
 
 ```bash
-git clone https://github.com/0xLokiz/lp-risk-screener ~/.claude/skills/lp-risk-screener
+git clone https://github.com/0xLokiz/bstocks-lp-assistant ~/.claude/skills/bstocks-lp-assistant
 ```
 
 No restart needed beyond starting your next Claude session — skills are
@@ -47,6 +47,9 @@ like:
   actually worth it once you account for risk?*
 - "TSLA 这个池子选多宽的区间比较好？" — *what price range should I pick for
   a TSLA LP position?*
+- "我想在 NVDA 涨到某个价位的时候卖出，能不能用 LP 顺便赚点手续费？" —
+  *I want to sell NVDA once it hits a certain price — can an LP range do
+  that while earning fees along the way?*
 - "我现在的 LP 仓位要不要调整？" — *should I rebalance my current LP
   positions?*
 - "这个池子最近有没有财报之类的事件要注意？" — *any upcoming corporate
@@ -54,9 +57,10 @@ like:
 
 Claude reads `SKILL.md`, decides which of the six `riskscreen.py` commands
 to run (`stocks` / `vol` / `scan` / `range` / `positions` /
-`rebalance-check`), and explains the result — including the caveats (full-
-range vs. concentrated approximation, probability of staying in range,
-pending corporate actions).
+`rebalance-check`), and shows the result as a chart plus a short
+explanation — including the caveats (which range model produced the number,
+a breakeven-volatility read on whether the pool is a good deal, pending
+corporate actions).
 
 ## Step 3 — Acting on a recommendation
 
@@ -79,14 +83,15 @@ one — never a single silent swap.
 If you'd rather run it yourself:
 
 ```bash
-git clone https://github.com/0xLokiz/lp-risk-screener
-cd lp-risk-screener
-python riskscreen.py scan --top 15 --with-range   # needs a signed-in baw session
-python riskscreen.py range --investmentId <id>
+git clone https://github.com/0xLokiz/bstocks-lp-assistant
+cd bstocks-lp-assistant
+python riskscreen.py scan --top 15 --with-range        # needs a signed-in baw session
+python riskscreen.py range --investmentId <id>          # market-making ranges
+python riskscreen.py range --investmentId <id> --side sell   # limit-sell-style range
 python riskscreen.py positions
 python riskscreen.py rebalance-check
-python riskscreen.py stocks --limit 20            # no auth needed
-python riskscreen.py vol --ticker TSLA            # no auth needed
+python riskscreen.py stocks --limit 20                  # no auth needed
+python riskscreen.py vol --ticker TSLA --apy 0.30        # no auth needed
 ```
 
 See [README.md](README.md) for the model behind the numbers and
