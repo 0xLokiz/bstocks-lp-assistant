@@ -1,5 +1,7 @@
 # bStocks LP Assistant
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 A volatility-aware LP advisor for Binance Web3 **bStocks** pools — built
 entirely on the **Binance MCP / Agent OS framework**: Binance's Web3
 market-data APIs plus the Agentic Wallet (`baw`) MCP/CLI surface, no other
@@ -347,6 +349,7 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
 ### Recently shipped (from a PM/QA pass)
 
 A full product review plus a full test pass produced these, in addition to
