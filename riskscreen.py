@@ -50,6 +50,7 @@ the `investmentId` + token addresses; actually moving funds goes through
 """
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -59,6 +60,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+MAX_CONCURRENT_BAW_CALLS = 8  # bounds parallel `baw`/kline fetches -- see run_scan's Pass 1
 
 RWA_LIST_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai"
 KLINE_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/kline/ai"
@@ -598,15 +601,28 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
 
     # Pass 1: resolve each candidate's stock/vol/apy, without deciding risk flags yet --
     # the peer-outlier check needs every ticker's full apy list first.
-    prepared = []
-    vol_cache = {}
-    for pool in candidates:
-        try:
-            info = fetch_investment_info(pool["investmentId"])
-        except Exception:
-            continue
-        time.sleep(0.1)
+    #
+    # Each `baw` call is a separate Node.js process spawn (~0.6s of pure process-startup
+    # overhead, independent of the actual API latency) -- sequentially that's ~0.6s times
+    # the candidate count, which is the dominant cost of this whole command once pagination
+    # widens the candidate set. These are independent, stateless reads, so fetch them
+    # concurrently instead; MAX_CONCURRENT_BAW_CALLS bounds how hard that hits the API.
+    info_by_pool = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as pool_executor:
+        future_to_pool = {pool_executor.submit(fetch_investment_info, p["investmentId"]): p for p in candidates}
+        for future in concurrent.futures.as_completed(future_to_pool):
+            p = future_to_pool[future]
+            try:
+                info_by_pool[p["investmentId"]] = future.result()
+            except Exception:
+                pass
 
+    resolved = []  # (pool, info, stock) for candidates whose assetTokenList confirms a bStock
+    unique_stock_keys = set()
+    for pool in candidates:
+        info = info_by_pool.get(pool["investmentId"])
+        if info is None:
+            continue
         chain_id = pool.get("binanceChainId") or info.get("binanceChainId")
         asset_list = info.get("assetTokenList") or []
         stock = next(
@@ -620,16 +636,28 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             # pool, trusting the name guess anyway risks attributing volatility/apy data to
             # the wrong token entirely. Skip rather than silently mis-score the pool.
             continue
+        resolved.append((pool, info, stock))
+        unique_stock_keys.add((stock["chainId"], stock["contractAddress"]))
 
-        key = (stock["chainId"], stock["contractAddress"])
-        if key not in vol_cache:
+    # Klines are plain HTTP (no subprocess spawn), but still worth fetching concurrently
+    # for the same reason -- network round-trip latency, not local CPU, dominates.
+    vol_cache = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as kline_executor:
+        future_to_key = {
+            kline_executor.submit(fetch_klines, chain_id, addr, limit=91): (chain_id, addr)
+            for chain_id, addr in unique_stock_keys
+        }
+        for future in concurrent.futures.as_completed(future_to_key):
+            key = future_to_key[future]
             try:
-                klines = fetch_klines(stock["chainId"], stock["contractAddress"], limit=91)
-                vol_cache[key] = annualized_volatility(klines)
+                vol_cache[key] = annualized_volatility(future.result())
             except Exception:
                 vol_cache[key] = None
-            time.sleep(0.1)
-        sigma = vol_cache[key]
+
+    prepared = []
+    for pool, info, stock in resolved:
+        key = (stock["chainId"], stock["contractAddress"])
+        sigma = vol_cache.get(key)
         if sigma is None or sigma <= 0:
             continue
 

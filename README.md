@@ -216,6 +216,20 @@ deposit` / `defi lp-add` / `defi redeem` / `defi lp-remove`, using the
 `investmentId` / token addresses this tool printed. See `SKILL.md` →
 "Executing a recommendation" for the exact flow an agent should follow.
 
+## Performance
+
+Every `baw` call is a separate Node.js process spawn (~0.6s of pure
+startup overhead, before any actual API latency). `scan`/`recommend` need
+one such call per candidate pool, so run sequentially that's roughly
+`0.6s × pool count` — noticeable once pagination (below) widens the
+candidate set. `run_scan`'s pool-info and kline fetches now run
+concurrently (`concurrent.futures.ThreadPoolExecutor`, capped at
+`MAX_CONCURRENT_BAW_CALLS = 8`) instead of one at a time. Measured on the
+same machine: `scan --top 5` (default 3-page sweep, ~39 candidate pools)
+**43.7s → 10.1s**; `recommend` (1-page default) **down to ~7s**. If a run
+still feels slow, `--max-pages` is the main lever — each extra page adds
+~100 more candidate pools to fetch.
+
 ## Status
 
 Validated end-to-end against a live `baw` session. Live output
@@ -363,3 +377,6 @@ the crash/correctness bugfixes covered in "Status" above:
 - **`test_riskscreen.py`** — 53 unit tests over every pure-math function
   (`breakeven_volatility`, `vol_richness_ratio`, `no_exit_probability`,
   `pool_risk_flags`, ...). Run with `pytest test_riskscreen.py`.
+- **Parallelized `baw`/kline fetches** — pagination (above) made `scan`'s
+  sequential per-pool calls the dominant cost; see "Performance" for the
+  43.7s → 10.1s measurement.
