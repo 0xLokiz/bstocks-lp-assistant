@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""bStocks LP Assistant -- volatility-aware LP advisor for Binance Web3 tokenized-stock pools.
+"""bStocks LP Assistant -- volatility-aware LP advisor for Binance Web3 bStock pools.
+
+Scoped to bStocks specifically (RWA list `type=3`, symbols suffixed "...B",
+e.g. TSLAB, NVDAB) -- not Ondo ("...on") or xStocks ("...x") tokenized
+stocks, which are separate providers on the same underlying tickers.
+`fetch_stock_tokens()` defaults to `type_filter=BSTOCK_TYPE`; pass
+`type_filter=None`/`--type 0` explicitly to browse other providers.
 
 LP fee/incentive APY is compensation for impermanent loss (IL), and IL scales
 with the volatility of the pooled assets. This tool re-ranks LP pools by
@@ -65,7 +71,13 @@ def _get(url, params):
         return json.loads(resp.read())
 
 
-def fetch_stock_tokens(type_filter=None):
+BSTOCK_TYPE = 3  # RWA list `type`: 1=Ondo ("...on"), 2=xStocks ("...x"), 3=bStock ("...B")
+
+
+def fetch_stock_tokens(type_filter=BSTOCK_TYPE):
+    """Defaults to bStock (type=3) only -- this product is scoped to bStocks specifically,
+    not tokenized-stock LPs on other providers. Pass type_filter=None for every platform,
+    or 1/2 to browse Ondo/xStocks instead."""
     params = {"type": type_filter} if type_filter else {}
     body = _get(RWA_LIST_URL, params)
     if not body.get("success"):
@@ -634,7 +646,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_stocks = sub.add_parser("stocks", help="list tokenized-stock tokens")
-    p_stocks.add_argument("--type", type=int, default=None, help="1=Ondo, 2=xStocks, 3=bStock")
+    p_stocks.add_argument("--type", type=int, default=BSTOCK_TYPE,
+                           help="1=Ondo, 2=xStocks, 3=bStock (default -- this product's focus); 0=all platforms")
     p_stocks.add_argument("--limit", type=int, default=20)
     p_stocks.set_defaults(func=cmd_stocks)
 

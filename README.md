@@ -1,9 +1,16 @@
 # bStocks LP Assistant
 
-A volatility-aware LP advisor for Binance Web3 tokenized-stock (bStocks)
-pools — built entirely on the **Binance MCP / Agent OS framework**: Binance's
-Web3 market-data APIs plus the Agentic Wallet (`baw`) MCP/CLI surface, no
-other data source or execution path.
+A volatility-aware LP advisor for Binance Web3 **bStocks** pools — built
+entirely on the **Binance MCP / Agent OS framework**: Binance's Web3
+market-data APIs plus the Agentic Wallet (`baw`) MCP/CLI surface, no other
+data source or execution path.
+
+Scoped to bStocks specifically (RWA list `type=3`, symbols suffixed `...B`,
+e.g. `TSLAB`, `NVDAB`) — not Ondo (`...on`) or xStocks (`...x`), which are
+separate tokenized-stock providers on the same underlying tickers.
+`fetch_stock_tokens()` defaults to bStock-only, and every command inherits
+that scope by default (`stocks --type` can browse other providers
+explicitly if asked).
 
 ## Built on Binance MCP — module by module
 

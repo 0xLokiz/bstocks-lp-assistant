@@ -14,6 +14,16 @@ computes volatility from each stock token's on-chain kline history, prices
 that risk properly, and nets it out of the pool's APY before ranking, using
 `riskscreen.py` in this directory.
 
+## Scope: bStocks only
+
+This tool is scoped to **bStocks** specifically — Binance's own tokenized-
+stock provider (RWA list `type=3`, symbols suffixed `...B`, e.g. `TSLAB`,
+`NVDAB`) — not Ondo (`...on`) or xStocks (`...x`), which are separate
+providers on the same underlying tickers. `fetch_stock_tokens()` defaults to
+bStock-only; every command inherits that by default. If a user explicitly
+asks about Ondo/xStocks pools, that's out of this skill's scope — say so
+rather than silently mixing providers into a ranking.
+
 ## When to use
 
 Trigger this skill when the user's request is about:
