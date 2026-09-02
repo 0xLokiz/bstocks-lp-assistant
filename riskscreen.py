@@ -65,6 +65,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -75,6 +76,26 @@ KLINE_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/walle
 UA = "binance-web3/1.1 (Skill)"
 
 DAYS_PER_YEAR = 365
+
+SCHEMA_VERSION = "1.0"
+
+
+def _json_envelope(status, **fields):
+    """Consistent shape for every JSON blob this tool prints, success or error -- schema_version,
+    status, run_id, and as_of are always present, so a consumer doesn't need different parsing
+    logic for the error case than the success case. Before this, an error path printed a bare
+    {"error": str(e)} with none of these fields, while a success path had no explicit status at
+    all (implied only by the absence of "error") -- a real inconsistency, not a style nit: a
+    scheduler parsing this output needed bespoke per-command logic just to reliably tell success
+    from failure. `fields` are merged in on top (command-specific: results/positions/error/etc).
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "run_id": str(uuid.uuid4()),
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
 
 
 HTTP_MAX_RETRIES = 3
@@ -1223,7 +1244,8 @@ def cmd_scan(args):
         )
     except Exception as e:
         if args.json:
-            print(json.dumps({"error": str(e), "hint": "run `baw auth signin` / `baw auth verify`"}, indent=2))
+            print(json.dumps(_json_envelope("error", error=str(e),
+                                             hint="run `baw auth signin` / `baw auth verify`"), indent=2))
         else:
             print(f"could not fetch LP pools: {e}", file=sys.stderr)
             print("run `baw auth signin` / `baw auth verify` first, then re-run scan.", file=sys.stderr)
@@ -1237,17 +1259,17 @@ def cmd_scan(args):
     if args.json:
         # Pure JSON on stdout -- nothing else -- so a scheduler/pipeline can parse it directly.
         # Diagnostics (fetch progress, etc.) went to stderr above via `log`.
-        print(json.dumps({
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "elapsed_seconds": round(time.time() - started, 1),
-            "results": results[: args.top],
-            "flagged": flagged,
-            "unscoreable": unscoreable,
-            "failure_summary": _summarize_unscoreable(unscoreable),
-            "capital_note": capital_note,
-            "model_apy_caveat": MODEL_APY_CAVEAT,
-            "v4_override_reason": args.allow_v4,
-        }, indent=2))
+        print(json.dumps(_json_envelope(
+            "ok",
+            elapsed_seconds=round(time.time() - started, 1),
+            results=results[: args.top],
+            flagged=flagged,
+            unscoreable=unscoreable,
+            failure_summary=_summarize_unscoreable(unscoreable),
+            capital_note=capital_note,
+            model_apy_caveat=MODEL_APY_CAVEAT,
+            v4_override_reason=args.allow_v4,
+        ), indent=2))
         return
 
     if args.with_range:
@@ -1528,7 +1550,8 @@ def cmd_positions(args):
         data = fetch_positions(refresh=args.refresh)
     except Exception as e:
         if args.json:
-            print(json.dumps({"error": str(e)}, indent=2))
+            print(json.dumps(_json_envelope("error", error=str(e),
+                                             hint="run `baw auth signin` / `baw auth verify`"), indent=2))
         else:
             print(f"could not fetch positions: {e}", file=sys.stderr)
             print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
@@ -1539,11 +1562,8 @@ def cmd_positions(args):
     hits = lp_positions_on_stock_tokens(data, stock_index)
 
     if args.json:
-        print(json.dumps({
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "total_defi_value_usd": total,
-            "positions": hits,
-        }, indent=2, default=str))
+        print(json.dumps(_json_envelope("ok", total_defi_value_usd=total, positions=hits),
+                          indent=2, default=str))
         return
 
     print(f"total DeFi value: ${total:,.2f}\n")
@@ -1656,7 +1676,8 @@ def cmd_rebalance_check(args):
         data = fetch_positions()
     except Exception as e:
         if args.json:
-            print(json.dumps({"error": str(e)}, indent=2))
+            print(json.dumps(_json_envelope("error", error=str(e),
+                                             hint="run `baw auth signin` / `baw auth verify`"), indent=2))
         else:
             print(f"could not fetch positions: {e}", file=sys.stderr)
             print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
@@ -1665,8 +1686,7 @@ def cmd_rebalance_check(args):
     stock_index = build_stock_index(stock_tokens)
     held = lp_positions_on_stock_tokens(data, stock_index)
     if not held:
-        payload = {"as_of": datetime.now(timezone.utc).isoformat(), "positions": [], "any_needs_attention": False,
-                   "v4_override_reason": args.allow_v4}
+        payload = _json_envelope("ok", positions=[], any_needs_attention=False, v4_override_reason=args.allow_v4)
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
@@ -1685,7 +1705,7 @@ def cmd_rebalance_check(args):
                                                        with_range=False, log=lambda msg: None)
     except Exception as e:
         if args.json:
-            print(json.dumps({"error": str(e)}, indent=2))
+            print(json.dumps(_json_envelope("error", error=str(e)), indent=2))
         else:
             print(f"could not fetch market pools: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1780,13 +1800,13 @@ def cmd_rebalance_check(args):
         })
 
     if args.json:
-        print(json.dumps({
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "elapsed_seconds": round(time.time() - started, 1),
-            "positions": rows,
-            "any_needs_attention": any(r["needs_attention"] for r in rows),
-            "v4_override_reason": args.allow_v4,
-        }, indent=2))
+        print(json.dumps(_json_envelope(
+            "ok",
+            elapsed_seconds=round(time.time() - started, 1),
+            positions=rows,
+            any_needs_attention=any(r["needs_attention"] for r in rows),
+            v4_override_reason=args.allow_v4,
+        ), indent=2))
     else:
         print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
               "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")

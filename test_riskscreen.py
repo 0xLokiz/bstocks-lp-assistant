@@ -35,6 +35,7 @@ from riskscreen import (
     _best_alternative_for_ticker,
     _exact_double_barrier_no_exit_probability,
     _il_at_price_ratio,
+    _json_envelope,
     _load_stablecoin_addresses,
     _nonneg_float,
     _offset_fraction,
@@ -46,6 +47,7 @@ from riskscreen import (
     _switching_recommendation,
     _union_bound_no_exit_probability,
     _v4_override_reason,
+    SCHEMA_VERSION,
     SWITCH_PAYBACK_DAYS_WORTHWHILE,
 )
 
@@ -703,6 +705,31 @@ def test_summarize_unscoreable_counts_by_reason():
 
 def test_summarize_unscoreable_empty():
     assert _summarize_unscoreable([]) == {}
+
+
+# ---- _json_envelope (consistent success/error JSON shape) ----
+
+def test_json_envelope_has_consistent_base_fields():
+    env = _json_envelope("ok", results=[1, 2, 3])
+    assert env["schema_version"] == SCHEMA_VERSION
+    assert env["status"] == "ok"
+    assert isinstance(env["run_id"], str) and env["run_id"]
+    assert isinstance(env["as_of"], str) and env["as_of"]
+    assert env["results"] == [1, 2, 3]
+
+
+def test_json_envelope_error_and_ok_share_the_same_shape():
+    ok_env = _json_envelope("ok", positions=[])
+    error_env = _json_envelope("error", error="boom")
+    base_keys = {"schema_version", "status", "run_id", "as_of"}
+    assert base_keys.issubset(ok_env.keys())
+    assert base_keys.issubset(error_env.keys())
+    assert ok_env["status"] == "ok"
+    assert error_env["status"] == "error"
+
+
+def test_json_envelope_run_id_unique_per_call():
+    assert _json_envelope("ok")["run_id"] != _json_envelope("ok")["run_id"]
 
 
 # ---- passes_trade_gate (the NO_TRADE fix) ----

@@ -271,9 +271,11 @@ python riskscreen.py rebalance-check [--json] [--max-pages 3] [--allow-v4 "REASO
 **`--json` on `scan`/`positions`/`rebalance-check` is pure JSON on stdout —
 nothing else.** Progress/diagnostic messages go to stderr, so a scheduler or
 pipeline consuming `--json` output never has to strip prose out of it. Every
-JSON payload carries `as_of` (an ISO-8601 UTC timestamp of when the data was
-pulled) — surface it if a user asks "how fresh is this," don't just say
-"current."
+JSON payload — success or error alike — shares one envelope: `schema_version`,
+`status` (`"ok"`/`"error"`), `run_id`, and `as_of` (an ISO-8601 UTC timestamp
+of when the data was pulled — surface it if a user asks "how fresh is this,"
+don't just say "current") are always present, with command-specific fields
+merged on top.
 
 **`recommend` is the default answer** to an open-ended "what should I do"
 question — it wraps `scan --with-range` (page 1 only, for speed) plus a

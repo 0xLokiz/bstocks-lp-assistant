@@ -335,7 +335,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 124 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 127 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -392,6 +392,16 @@ data changing fast is exactly what a risk screener needs to see, and
 caching it would trade the one thing this tool is supposed to get right
 for a speedup that matters far less than the `ThreadPoolExecutor`
 concurrency fix below already delivered.
+
+Every JSON output — `scan`/`positions`/`rebalance-check`, success or error
+— now shares one envelope shape via `_json_envelope()`: `schema_version`,
+`status` (`"ok"`/`"error"`), `run_id`, and `as_of` are always present,
+with command-specific fields (`results`, `positions`, `error`, ...) merged
+on top. Before this, an error path printed a bare `{"error": ...}` with
+none of those fields while a success path had no explicit `status` at all
+(only implied by the absence of `"error"`) — a real inconsistency, not a
+style nit: a scheduler parsing this output needed different logic for the
+error case than the success case just to tell them apart reliably.
 
 ## Performance
 
@@ -558,14 +568,21 @@ bad verdict" above for the full picture; in brief:
   no more re-fetching the token list a second time just to check held
   positions after `run_scan()` already fetched it. Deliberately not
   extended to pool status/APY/TVL — see "Reliability" above for why.
+- **Every JSON output shares one envelope shape** (`schema_version`,
+  `status`, `run_id`, `as_of`, always present on success or error) via
+  `_json_envelope()` — previously an error path printed a bare
+  `{"error": ...}` with none of those fields, while success had no
+  explicit `status` at all.
 
-2 new tests (124 total). Verified live (successful fetch, URL-encoding of
+5 new tests (127 total). Verified live (successful fetch, URL-encoding of
 special characters, a genuinely unreachable host retrying then failing
-with a clear diagnosable error, and — for the caching fix — counting
-actual HTTP calls across a full `recommend` run to confirm the second
-`fetch_stock_tokens()` call became a cache hit, not a real fetch) and via
-two synthetic end-to-end scenarios for the `recommend` refuse-threshold
-(normal case unaffected, high-failure case correctly refuses).
+with a clear diagnosable error, counting actual HTTP calls across a full
+`recommend` run to confirm the caching fix's second `fetch_stock_tokens()`
+call became a cache hit rather than a real fetch, and every JSON output
+site — success and error, all three commands — checked directly for the
+new envelope fields) and via two synthetic end-to-end scenarios for the
+`recommend` refuse-threshold (normal case unaffected, high-failure case
+correctly refuses).
 
 ### Recently shipped (important logic & UX issues, from the same review)
 
