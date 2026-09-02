@@ -682,6 +682,27 @@ MIN_SANE_TVL_USD = 5_000       # below this, a single trade can dominate the ann
 PEER_APY_OUTLIER_MULTIPLE = 5  # flag if > 5x the median apy of other pools on the same ticker
 MIN_PROTOCOL_SECURITY_SCORE = 50  # `defi protocol-info` securityScore floor (0-100)
 
+_PROTOCOL_ID_VERSION_RE = re.compile(r"(\d+)$")
+
+
+def _protocol_carries_unaudited_hook_risk(protocol_id, protocol_name):
+    """True if this protocol's version generation is 4 or later -- V4-style pluggable-hook
+    architecture, i.e. custom logic outside the audited core AMM that this tool has no way to
+    inspect. Checked primarily via the structured `defiProtocolId` (e.g. "uniswap4",
+    "pancakeswap4"), not the display name: PancakeSwap's own V4 is marketed as "PancakeSwap
+    Infinity" with no "v4"/"V4" substring anywhere in that name, so a pure name-match (which
+    this replaced) silently let it through the hard block -- confirmed live, not hypothetical
+    (defiProtocolId="pancakeswap4", protocolName="PancakeSwap Infinity", 3 such pools live on
+    BSC at the time this was fixed). Falls back to a name-text match when defiProtocolId is
+    missing or doesn't end in a version number, so an unrecognized id scheme doesn't silently
+    disable the check.
+    """
+    if protocol_id:
+        m = _PROTOCOL_ID_VERSION_RE.search(protocol_id)
+        if m:
+            return int(m.group(1)) >= 4
+    return "v4" in (protocol_name or "").lower()
+
 
 def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
                      max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
@@ -722,20 +743,23 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
         case: Uniswap's own score gives no warning). This signal is a weak floor against
         obviously disreputable protocols, not a substitute for the hook-level audit tracked in
         the README roadmap -- do not present it as though it clears a V4 pool as hook-safe.
-      - `block_unknown_v4_hooks` (default True): Uniswap V4 pools can carry an arbitrary
+      - `block_unknown_v4_hooks` (default True): V4-generation pools can carry an arbitrary
         custom hook -- logic outside the audited core AMM, and this product has no API access
         to a pool's hook address, permissions, or audit status (see the securityScore
         limitation above -- protocol-level score can't see it either). Per the PM/QA review,
-        contract risk this unknown is a hard block by default, not just a caveat: every V4
-        pool is flagged until real hook-inspection data is available, not only ones with an
-        already-visible symptom like an extreme feeRate. Pass False to disable for an
-        already-vetted pool or explicit user override.
+        contract risk this unknown is a hard block by default, not just a caveat: every
+        V4-generation pool is flagged until real hook-inspection data is available, not only
+        ones with an already-visible symptom like an extreme feeRate. Detected primarily via
+        the structured `defiProtocolId` (e.g. "uniswap4"), not the display name -- see
+        `_protocol_carries_unaudited_hook_risk`. Pass False to disable for an already-vetted
+        pool or explicit user override.
     """
     flags = []
 
+    protocol_id = (pool.get("defiProtocolId") or info.get("defiProtocolId") or "")
     protocol_name = (pool.get("protocolName") or info.get("protocolName") or "")
-    if block_unknown_v4_hooks and "v4" in protocol_name.lower():
-        flags.append(f"{protocol_name}: V4 pools can carry an arbitrary custom hook "
+    if block_unknown_v4_hooks and _protocol_carries_unaudited_hook_risk(protocol_id, protocol_name):
+        flags.append(f"{protocol_name}: V4-generation pools can carry an arbitrary custom hook "
                       f"with unaudited logic, and this tool has no way to inspect the hook's address, "
                       f"permissions, or audit status. Blocked by default until that's available "
                       f"(pass block_unknown_v4_hooks=False / --allow-v4 to override)")

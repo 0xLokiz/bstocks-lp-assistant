@@ -524,6 +524,30 @@ def test_pool_risk_flags_v4_override_disables_block():
     assert flags == []
 
 
+def test_pool_risk_flags_blocks_v4_by_defi_protocol_id_even_without_v4_in_name():
+    # PancakeSwap's own V4 is marketed as "PancakeSwap Infinity" -- no "v4"/"V4" substring
+    # anywhere in the display name. A pure name-match would silently miss this (confirmed live:
+    # defiProtocolId="pancakeswap4", protocolName="PancakeSwap Infinity", real pools on BSC).
+    pool = {"tvl": "50000", "protocolName": "PancakeSwap Infinity", "defiProtocolId": "pancakeswap4"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    flags = pool_risk_flags(pool, info)
+    assert any("V4-generation" in f for f in flags)
+
+
+def test_pool_risk_flags_v3_not_blocked_by_defi_protocol_id():
+    pool = {"tvl": "50000", "protocolName": "PancakeSwap V3", "defiProtocolId": "pancakeswap3"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    assert pool_risk_flags(pool, info) == []
+
+
+def test_pool_risk_flags_falls_back_to_name_match_without_defi_protocol_id():
+    # no defiProtocolId at all -- must not silently disable the check
+    pool = {"tvl": "50000", "protocolName": "Some New V4 Fork"}
+    info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
+    flags = pool_risk_flags(pool, info)
+    assert any("V4-generation" in f for f in flags)
+
+
 # ---- evaluate_pool ----
 
 def test_evaluate_pool_clean_returns_no_flags_and_scored_data():
