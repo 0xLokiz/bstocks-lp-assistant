@@ -54,13 +54,17 @@ import concurrent.futures
 import json
 import math
 import os
+import random
 import re
 import shutil
 import statistics
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 
 MAX_CONCURRENT_BAW_CALLS = 8  # bounds parallel `baw`/kline fetches -- see run_scan's Pass 1
@@ -72,11 +76,45 @@ UA = "binance-web3/1.1 (Skill)"
 DAYS_PER_YEAR = 365
 
 
-def _get(url, params):
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    req = urllib.request.Request(f"{url}?{query}", headers={"Accept-Encoding": "identity", "User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
+HTTP_MAX_RETRIES = 3
+HTTP_BASE_RETRY_DELAY = 0.5  # seconds; exponential backoff with jitter, see _get
+
+
+def _get(url, params, max_retries=HTTP_MAX_RETRIES):
+    """GET url?params as JSON, with bounded retry-with-jitter on transient failures (timeout,
+    connection error, 5xx, 429 rate-limit) -- not on a 4xx client error otherwise, which won't
+    fix itself on retry, and not on a malformed/wrong-shaped response body, which more likely
+    means a real API contract problem than a network blip. Raises RuntimeError with the
+    failure classified and enough context to diagnose (url, status if any, attempt count) once
+    retries are exhausted, instead of a bare urllib traceback.
+    """
+    query = urllib.parse.urlencode(params)
+    full_url = f"{url}?{query}"
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(full_url, headers={"Accept-Encoding": "identity", "User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"GET {full_url} returned non-JSON response: {raw[:200]!r}") from e
+            if not isinstance(body, dict):
+                raise RuntimeError(f"GET {full_url} returned unexpected JSON shape "
+                                    f"(expected an object, got {type(body).__name__})")
+            return body
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or e.code >= 500:
+                last_error = e
+            else:
+                raise RuntimeError(f"GET {full_url} failed: HTTP {e.code} {e.reason}") from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last_error = e
+        if attempt < max_retries:
+            delay = HTTP_BASE_RETRY_DELAY * (2 ** (attempt - 1)) * (1 + random.random())
+            time.sleep(delay)
+    raise RuntimeError(f"GET {full_url} failed after {max_retries} attempts: {last_error}") from last_error
 
 
 BSTOCK_TYPE = 3  # RWA list `type`: 1=Ondo ("...on"), 2=xStocks ("...x"), 3=bStock ("...B")
@@ -937,6 +975,27 @@ def cmd_vol(args):
               f"est. full-range IL/yr = {il*100:.2f}%{be_str}")
 
 
+def _classify_fetch_error(e):
+    """Coarse classification of a concurrent-fetch failure (investment-info or kline), for
+    unscoreable reasons and failure_summary -- so "N pools failed" doesn't hide whether that's
+    a transient timeout/network blip (worth retrying the whole run) or a per-pool data problem
+    (this specific pool is broken, retrying won't help)."""
+    if isinstance(e, (subprocess.TimeoutExpired, TimeoutError)):
+        return "timeout"
+    if isinstance(e, (urllib.error.URLError, ConnectionError)):
+        return "network error"
+    if isinstance(e, ValueError):
+        return "invalid data"
+    return "error"
+
+
+def _summarize_unscoreable(unscoreable):
+    """Frequency count of unscoreable reasons -- lets a caller see 'what kind of problem, how
+    many' at a glance (e.g. {"could not compute volatility (kline fetch failed (network error))": 5})
+    instead of reading a wall of per-pool messages one at a time to notice a pattern."""
+    return dict(Counter(u["reason"] for u in unscoreable))
+
+
 def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_USD,
              peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE, min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
              block_unknown_v4_hooks=True, with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
@@ -982,14 +1041,15 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
     # widens the candidate set. These are independent, stateless reads, so fetch them
     # concurrently instead; MAX_CONCURRENT_BAW_CALLS bounds how hard that hits the API.
     info_by_pool = {}
+    info_fetch_errors = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as pool_executor:
         future_to_pool = {pool_executor.submit(fetch_investment_info, p["investmentId"]): p for p in candidates}
         for future in concurrent.futures.as_completed(future_to_pool):
             p = future_to_pool[future]
             try:
                 info_by_pool[p["investmentId"]] = future.result()
-            except Exception:
-                pass
+            except Exception as e:
+                info_fetch_errors[p["investmentId"]] = _classify_fetch_error(e)
 
     resolved = []  # (pool, info, stock, quote_addr, pair_mode) for confirmed-bStock candidates
     unscoreable = []  # (pool_name, reason) -- surfaced, never silently dropped (see run_scan docstring)
@@ -997,7 +1057,8 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
     for pool in candidates:
         info = info_by_pool.get(pool["investmentId"])
         if info is None:
-            unscoreable.append((pool.get("investmentName"), "investment-info fetch failed"))
+            reason = info_fetch_errors.get(pool["investmentId"], "error")
+            unscoreable.append((pool.get("investmentName"), f"investment-info fetch failed ({reason})"))
             continue
         stock, chain_id, quote_addr, pair_mode = resolve_pool_stock_and_quote(pool, info, stock_index)
         if stock is None:
@@ -1019,6 +1080,7 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
     # Klines are plain HTTP (no subprocess spawn), but still worth fetching concurrently
     # for the same reason -- network round-trip latency, not local CPU, dominates.
     kline_cache = {}
+    kline_fetch_errors = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as kline_executor:
         future_to_key = {
             kline_executor.submit(fetch_klines, chain_id, addr, limit=91): (chain_id, addr)
@@ -1028,34 +1090,48 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             key = future_to_key[future]
             try:
                 kline_cache[key] = future.result()
-            except Exception:
+            except Exception as e:
                 kline_cache[key] = None
+                kline_fetch_errors[key] = _classify_fetch_error(e)
 
     prepared = []
     for pool, info, stock, chain_id, quote_addr, pair_mode in resolved:
         stock_key = (stock["chainId"], stock["contractAddress"])
         stock_klines = kline_cache.get(stock_key)
+        vol_reason = None  # set below when sigma ends up None, so the unscoreable reason can
+                            # distinguish "the kline fetch itself failed" from "it succeeded but
+                            # the data was too thin/misaligned to trust" -- previously both
+                            # collapsed into the same generic "insufficient kline history"
         if pair_mode == "stablecoin":
             # quote is a stablecoin -- its own volatility is ~0, so IL is driven almost
             # entirely by the bStock's own volatility (see README "The idea"). Yang-Zhang
             # (best_available_volatility) uses the OHLC data we already have instead of
             # close-only, for a more statistically efficient, drift-independent estimate.
-            sigma = best_available_volatility(stock_klines) if stock_klines else None
+            if stock_klines:
+                sigma = best_available_volatility(stock_klines)
+                vol_reason = None if sigma else "insufficient kline history"
+            else:
+                sigma = None
+                vol_reason = f"kline fetch failed ({kline_fetch_errors.get(stock_key, 'error')})"
         else:
             # non-stablecoin quote (e.g. bStock/BNB): IL depends on the *relative* price move
             # between the two pooled assets, not the bStock's volatility alone. Using the
             # bStock-only volatility here would silently understate risk whenever the quote
             # asset moves too -- this was a real bug, not a simplification: NVDAB-BNB,
             # BNB-SPCXB, HOODB-BNB etc. were being scored as if BNB were a stablecoin.
-            quote_klines = kline_cache.get((chain_id, quote_addr))
+            quote_key = (chain_id, quote_addr)
+            quote_klines = kline_cache.get(quote_key)
             if stock_klines and quote_klines:
                 rel_vol = relative_annualized_volatility(stock_klines, quote_klines)
                 sigma, vol_reason = rel_vol["sigma"], rel_vol["reason"]
+            elif stock_klines is None:
+                sigma = None
+                vol_reason = f"kline fetch failed ({kline_fetch_errors.get(stock_key, 'error')})"
             else:
-                sigma, vol_reason = None, None
+                sigma = None
+                vol_reason = f"quote kline fetch failed ({kline_fetch_errors.get(quote_key, 'error')})"
         if sigma is None or sigma <= 0:
-            reason = (vol_reason or "insufficient/no overlapping kline history") if pair_mode == "non_stablecoin" \
-                else "insufficient kline history"
+            reason = vol_reason or "insufficient/no overlapping kline history"
             unscoreable.append((pool.get("investmentName"), f"could not compute volatility ({reason})"))
             continue
 
@@ -1149,6 +1225,7 @@ def cmd_scan(args):
             "results": results[: args.top],
             "flagged": flagged,
             "unscoreable": unscoreable,
+            "failure_summary": _summarize_unscoreable(unscoreable),
             "capital_note": capital_note,
             "model_apy_caveat": MODEL_APY_CAVEAT,
             "v4_override_reason": args.allow_v4,
@@ -1324,6 +1401,11 @@ def passes_trade_gate(result):
     return result["model_net_apy"] > 0 and result["vol_ratio"] is not None and result["vol_ratio"] < 1
 
 
+UNSCOREABLE_RATIO_REFUSE_THRESHOLD = 0.5  # refuse a verdict when more than half the candidate
+                                            # pools couldn't even be evaluated -- the scoreable
+                                            # remainder may not be representative of the market
+
+
 def cmd_recommend(args):
     """Single entry point: one verdict instead of deciding which of scan/range/positions to
     run. Ties together the market screen, the top pick's range recommendation, and (if any
@@ -1335,6 +1417,15 @@ def cmd_recommend(args):
         print(f"could not fetch LP pools: {e}", file=sys.stderr)
         print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
         sys.exit(1)
+
+    total_candidates = len(results) + len(flagged) + len(unscoreable)
+    if total_candidates and len(unscoreable) / total_candidates > UNSCOREABLE_RATIO_REFUSE_THRESHOLD:
+        print(f"NO_TRADE -- {len(unscoreable)}/{total_candidates} candidate pools could not even be "
+              f"evaluated (data/coverage issue, not a safety verdict). That's too much of the market "
+              f"unaccounted for to trust a verdict from the scoreable remainder right now.")
+        print(f"({_summarize_unscoreable(unscoreable)})")
+        print("Try again shortly, or run `scan --with-range` to see exactly what failed.")
+        return
 
     if not results:
         print("NO_TRADE -- no bStock LP pools passed the pre-deposit screen right now.")

@@ -42,6 +42,7 @@ from riskscreen import (
     _positive_int,
     _rogers_satchell_variance,
     _single_barrier_touch_probability,
+    _summarize_unscoreable,
     _switching_recommendation,
     _union_bound_no_exit_probability,
     _v4_override_reason,
@@ -683,6 +684,25 @@ def test_switching_recommendation_stay_when_payback_too_slow():
     result = _switching_recommendation(position_usd=10, held_model_net_apy=0.05, alt_model_net_apy=0.06)
     assert result["verdict"] == "stay"
     assert result["payback_days"] > SWITCH_PAYBACK_DAYS_WORTHWHILE
+
+
+# ---- _summarize_unscoreable (failure_summary for run_scan's concurrent fetch handling) ----
+
+def test_summarize_unscoreable_counts_by_reason():
+    unscoreable = [
+        {"pool": "A-USDT", "reason": "investment-info fetch failed (timeout)"},
+        {"pool": "B-USDT", "reason": "investment-info fetch failed (timeout)"},
+        {"pool": "C-USDT", "reason": "could not compute volatility (insufficient kline history)"},
+    ]
+    summary = _summarize_unscoreable(unscoreable)
+    assert summary == {
+        "investment-info fetch failed (timeout)": 2,
+        "could not compute volatility (insufficient kline history)": 1,
+    }
+
+
+def test_summarize_unscoreable_empty():
+    assert _summarize_unscoreable([]) == {}
 
 
 # ---- passes_trade_gate (the NO_TRADE fix) ----

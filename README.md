@@ -335,7 +335,7 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 122 unit tests over the pure-math/pure-logic functions (no network/baw
+runs 124 unit tests over the pure-math/pure-logic functions (no network/baw
 needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
 every push. Live-data smoke tests for every command
 are documented in "Status" below.
@@ -346,6 +346,38 @@ prints a report and moves nothing. To act on any recommendation, run
 deposit` / `defi lp-add` / `defi redeem` / `defi lp-remove`, using the
 `investmentId` / token addresses this tool printed. See `SKILL.md` →
 "Executing a recommendation" for the exact flow an agent should follow.
+
+## Reliability: retries, error classification, refusing a bad verdict
+
+The public HTTP endpoints (RWA stock list, kline) go through `_get()`,
+which now retries a transient failure (timeout, connection error, 5xx, 429
+rate-limit) with exponential backoff and jitter before giving up, and
+builds its query string with `urllib.parse.urlencode` instead of naive
+string concatenation (which could corrupt the request or drop a parameter
+entirely on a value containing `&`/`=`/a space). A 4xx error other than 429
+isn't retried — it won't fix itself — and neither is a malformed or
+wrong-shaped response body, which more likely means a real API contract
+problem than a network blip; either way the eventual error names the URL,
+status, and attempt count instead of a bare `urllib` traceback.
+
+`run_scan`'s concurrent pool-info and kline fetches classify *why* an
+individual fetch failed (timeout / network error / invalid data / other)
+instead of collapsing every failure into the same generic "insufficient
+data" message — the reason distinguishes "the kline fetch itself failed"
+from "it succeeded but the data was too thin/misaligned to trust" (see
+"Harden `relative_annualized_volatility`" above), so a transient batch of
+timeouts doesn't read the same as individual pools genuinely lacking
+history. `scan --json` includes a `failure_summary` — a frequency count of
+`unscoreable` reasons — so a scheduler or a quick glance can see "what kind
+of problem, how many" without reading every per-pool line.
+
+`recommend` refuses to present a verdict at all when more than
+`UNSCOREABLE_RATIO_REFUSE_THRESHOLD` (50%) of the candidate pools couldn't
+even be evaluated — a `NO_TRADE` explaining that too much of the market is
+unaccounted for, rather than confidently picking a "Top pick" out of
+whatever scoreable sliver happened to survive a bad run (a symptom of a
+systemic problem — network trouble, a `baw` session issue — not a reason
+to trust the remainder as representative).
 
 ## Performance
 
@@ -486,6 +518,34 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
+### Recently shipped (stability, speed & observability, from the same review)
+
+The review's third tier: making failures diagnosable and refusing to
+present a confident verdict built on too little data, rather than adding
+new checks. See "Reliability: retries, error classification, refusing a
+bad verdict" above for the full picture; in brief:
+
+- **`_get()` retries transient HTTP failures** with exponential
+  backoff+jitter (timeout, connection error, 5xx, 429), and builds its
+  query string with `urllib.parse.urlencode` instead of naive string
+  concatenation.
+- **Concurrent fetch failures in `run_scan` are classified**, not
+  collapsed into one generic message — `unscoreable` reasons now say
+  *why* (timeout / network error / invalid data), and distinguish a
+  failed kline fetch from a successful-but-too-thin one.
+- **`scan --json` gains `failure_summary`** — a frequency count of
+  `unscoreable` reasons for an at-a-glance view of what's failing and how
+  much.
+- **`recommend` refuses a verdict** (explicit `NO_TRADE`) when more than
+  50% of candidate pools couldn't be evaluated at all, instead of quietly
+  picking a "Top pick" from an unrepresentative scoreable sliver.
+
+2 new tests (124 total). Verified live (successful fetch, URL-encoding of
+special characters, and a genuinely unreachable host retrying then failing
+with a clear diagnosable error) and via two synthetic end-to-end scenarios
+for the `recommend` refuse-threshold (normal case unaffected, high-failure
+case correctly refuses).
 
 ### Recently shipped (important logic & UX issues, from the same review)
 
