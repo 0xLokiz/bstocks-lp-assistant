@@ -606,6 +606,18 @@ already built.
   store is most of what a paper-trading harness would need to replay
   against anyway).
 
+### Recently shipped (leader lines — offset labels alone weren't enough)
+
+A same-direction offset label next to each point (the previous round's
+fix) turned out not to be enough on its own: in a tight cluster, a label
+can still sit ambiguously between two points or overlap a neighbor.
+`SKILL.md` now specifies actual collision-avoiding label placement (try a
+few candidate offsets, skip ones that would overlap an already-placed
+label) plus a leader line — a thin stroke from the point's edge to
+wherever the label ends up — so the association is unambiguous regardless
+of final position. Confirmed by rendering the corrected version for the
+same real user.
+
 ### Recently shipped (a fourth round from real usage)
 
 - **`SKILL.md` no longer tells the agent to invent a capital amount.**

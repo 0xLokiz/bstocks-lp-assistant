@@ -271,18 +271,25 @@ house style):
   bar chart whose length alone implies "bigger is better" for a metric
   where lower is what's good.
 
-**Every point needs a visible identity, not just a hover tooltip.** A chart
+**Every point needs a visible identity, not just a hover tooltip — and a
+label with no leader line is still ambiguous in a dense cluster.** A chart
 where you can't tell which point is which pool without hovering fails the
-one job the chart has — confirmed in practice (a real user's own chart: a
-correct bubble scatter, but every bubble the same color and no visible
-label meant "which one is `GOOGLB-USDT`?" needed a hover). Put each pool's
-name directly next to its point/bubble (a small offset text label, or the
-`chartjs-plugin-datalabels` plugin from `cdnjs.cloudflare.com` — loaded
-*after* Chart.js, *before* your inline script) — tooltips are a bonus for
-exact numbers, not the only way to identify a point. If there are enough
-points that direct labels would overlap into noise, label at minimum the
-`ENTER`-verdict / best few points directly and say so in the surrounding
-text ("top 5 labeled directly; hover for the rest").
+one job the chart has — confirmed in practice through two rounds with the
+same real user: round one had no labels at all ("which one is
+`GOOGLB-USDT`?" needed a hover); round two added labels at a fixed offset
+next to each point, and it *still* wasn't legible enough, because in a
+tight cluster (several pools close in both axes) a same-direction offset
+label can sit ambiguously between two points or overlap a neighboring
+label. The fix that actually holds up: place each label wherever there's
+room (try a few candidate offsets — right, upper-right, lower-right, left
+— and skip to the next one if it would overlap an already-placed label),
+then draw a short leader line (thin, `--text-muted`-ish gray, 1px) from
+the point's edge to wherever the label ended up. The leader line is what
+makes the association unambiguous regardless of final label position —
+don't skip it just because the label is "close enough" to its point.
+Label at minimum the `ENTER`-verdict / best few points this way, and say
+so in the surrounding text if not every point got one ("top 6 labeled;
+hover for the rest").
 
 **Keep bubbles small enough to read, especially in a dense cluster.** A
 second real problem observed in practice, on the same chart as above:
