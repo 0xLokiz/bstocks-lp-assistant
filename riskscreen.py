@@ -746,17 +746,27 @@ def fetch_lp_investments(max_pages=3):
     the first page. Sorted by apy DESC (the API default), so later pages surface lower-apy --
     but not necessarily lower risk-adjusted -- pools that a single 100-pool page would never
     reach. Stops early once a page comes back short (no more results) or `max_pages` is hit.
+
+    Returns (pools, pools_total): `pools_total` is the API's own count of every LiquidityPool
+    investment system-wide (the `total` field, present on every page), independent of how many
+    pages were actually fetched. Without this, `len(pools) < max_pages * 100` was the only way
+    to even suspect a scan was cut short -- a real gap: answering "did this cover every pool?"
+    took a live manual investigation before pools_total existed. Callers compare it against
+    len(pools) to tell a genuinely-complete scan apart from one `max_pages` truncated.
     """
     all_pools = []
+    pools_total = 0
     for page in range(1, max_pages + 1):
         body = baw("defi", "investment-list", "--investType", "LiquidityPool", "--size", "100", "--page", str(page))
         if not body.get("success"):
             raise RuntimeError(json.dumps(body.get("error", body)))
-        page_list = body["data"]["list"]
+        data = body["data"]
+        page_list = data["list"]
+        pools_total = data.get("total", pools_total)
         all_pools.extend(page_list)
         if len(page_list) < 100:
             break
-    return all_pools
+    return all_pools, pools_total
 
 
 POOL_SHARE_WARNING_THRESHOLD = 0.20  # warn if an intended deposit would exceed this share of pool TVL
@@ -1038,25 +1048,42 @@ def _summarize_unscoreable(unscoreable):
     return dict(Counter(u["reason"] for u in unscoreable))
 
 
+def _coverage_note(coverage, max_pages):
+    """Human-readable heads-up for text output when a scan's `--max-pages` cut off part of the
+    market -- None when the scan already saw every pool, so text mode stays quiet in the common
+    case instead of printing a coverage line every run."""
+    if not coverage["truncated"]:
+        return None
+    missed = coverage["pools_total"] - coverage["pools_fetched"]
+    return (f"NOTE: scanned {coverage['pools_fetched']}/{coverage['pools_total']} LP pools "
+            f"system-wide (--max-pages {max_pages}) -- {missed} more exist beyond this depth "
+            f"(lower-apy pools sort last, so these are unlikely to be the best pick, but they "
+            f"are unscanned, not screened out). Raise --max-pages to cover more of them.")
+
+
 def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_USD,
              peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE, min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
              block_unknown_v4_hooks=True, with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
     """Core of `scan`, factored out so `recommend` and `rebalance_check`'s market-comparison
     side share one evaluation path instead of drifting apart (see evaluate_pool). Returns
-    (results, flagged, unscoreable) sorted by net_apy descending; raises on an unrecoverable
-    baw error (e.g. not signed in) -- callers decide how to present that. `unscoreable` lists
-    (pool_name, reason) for candidates that were never scored at all (data fetch failed, no
-    confirmed bStock, no usable kline overlap) -- distinct from `flagged`, which is pools that
-    *were* scored but failed the risk/plausibility screen. Never silently drop one into the
-    other: a user needs to tell "we couldn't evaluate this" apart from "we evaluated it and
-    it's unsafe/implausible"."""
+    (results, flagged, unscoreable, coverage) sorted by net_apy descending; raises on an
+    unrecoverable baw error (e.g. not signed in) -- callers decide how to present that.
+    `unscoreable` lists (pool_name, reason) for candidates that were never scored at all (data
+    fetch failed, no confirmed bStock, no usable kline overlap) -- distinct from `flagged`,
+    which is pools that *were* scored but failed the risk/plausibility screen. Never silently
+    drop one into the other: a user needs to tell "we couldn't evaluate this" apart from "we
+    evaluated it and it's unsafe/implausible". `coverage` is {pools_fetched, pools_total,
+    truncated} -- see fetch_lp_investments -- so callers can tell the user when `max_pages`
+    left part of the market unscanned, instead of that being invisible."""
     log("fetching tokenized-stock list...")
     stock_tokens = fetch_stock_tokens()
     stock_index = build_stock_index(stock_tokens)
     ticker_by_symbol = {t["symbol"].lower(): t for t in stock_tokens}
 
     log("fetching LP pools (requires signed-in baw session)...")
-    pools = fetch_lp_investments(max_pages=max_pages)
+    pools, pools_total = fetch_lp_investments(max_pages=max_pages)
+    coverage = {"pools_fetched": len(pools), "pools_total": pools_total,
+                "truncated": len(pools) < pools_total}
 
     ticker_by_ticker = {t["ticker"].lower(): t for t in stock_tokens}
     candidates = []
@@ -1235,14 +1262,14 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
 
     results.sort(key=lambda r: r["model_net_apy"], reverse=True)
     unscoreable_dicts = [{"pool": name, "reason": reason, "verdict": VERDICT_UNSCOREABLE} for name, reason in unscoreable]
-    return results, flagged, unscoreable_dicts
+    return results, flagged, unscoreable_dicts, coverage
 
 
 def cmd_scan(args):
     started = time.time()
     log = (lambda msg: None) if args.json else (lambda msg: print(msg, file=sys.stderr))
     try:
-        results, flagged, unscoreable = run_scan(
+        results, flagged, unscoreable, coverage = run_scan(
             max_pages=args.max_pages, max_fee_rate=args.max_fee_rate, min_tvl=args.min_tvl,
             peer_outlier_multiple=args.peer_outlier_multiple, min_security_score=args.min_security_score,
             block_unknown_v4_hooks=not args.allow_v4, with_range=args.with_range, log=log,
@@ -1272,6 +1299,7 @@ def cmd_scan(args):
             unscoreable=unscoreable,
             failure_summary=_summarize_unscoreable(unscoreable),
             capital_note=capital_note,
+            coverage=coverage,
             model_apy_caveat=MODEL_APY_CAVEAT,
             v4_override_reason=args.allow_v4,
         ), indent=2))
@@ -1307,6 +1335,10 @@ def cmd_scan(args):
               "(safe but not attractive right now). [non-stablecoin pair] = vol is the "
               "*relative* vol between the two pooled assets, not the bStock alone -- see "
               "README. Full numbers: --json.)")
+
+    coverage_note = _coverage_note(coverage, args.max_pages)
+    if coverage_note:
+        print(f"\n{coverage_note}")
 
     if capital_note:
         top = results[0]
@@ -1493,12 +1525,17 @@ def cmd_recommend(args):
     run. Ties together the market screen, the top pick's range recommendation, and (if any
     are held) a one-line check on existing bStock LP positions against that market."""
     try:
-        results, flagged, unscoreable = run_scan(max_pages=args.max_pages, block_unknown_v4_hooks=not args.allow_v4,
-                                                  with_range=True, log=lambda msg: None)
+        results, flagged, unscoreable, coverage = run_scan(
+            max_pages=args.max_pages, block_unknown_v4_hooks=not args.allow_v4,
+            with_range=True, log=lambda msg: None)
     except Exception as e:
         print(f"could not fetch LP pools: {e}", file=sys.stderr)
         print("run `baw auth signin` / `baw auth verify` first, then retry.", file=sys.stderr)
         sys.exit(1)
+
+    coverage_note = _coverage_note(coverage, args.max_pages)
+    if coverage_note:
+        print(coverage_note)
 
     total_candidates = len(results) + len(flagged) + len(unscoreable)
     if total_candidates and len(unscoreable) / total_candidates > UNSCOREABLE_RATIO_REFUSE_THRESHOLD:
@@ -1750,15 +1787,19 @@ def cmd_rebalance_check(args):
     # that can't happen by construction.
     log("scanning current market for comparison (shared evaluation path with `scan`)...")
     try:
-        market_results, market_flagged, _ = run_scan(max_pages=args.max_pages,
-                                                       block_unknown_v4_hooks=not args.allow_v4,
-                                                       with_range=False, log=lambda msg: None)
+        market_results, market_flagged, _, market_coverage = run_scan(
+            max_pages=args.max_pages, block_unknown_v4_hooks=not args.allow_v4,
+            with_range=False, log=lambda msg: None)
     except Exception as e:
         if args.json:
             print(json.dumps(_json_envelope("error", error=str(e)), indent=2))
         else:
             print(f"could not fetch market pools: {e}", file=sys.stderr)
         sys.exit(1)
+
+    coverage_note = _coverage_note(market_coverage, args.max_pages)
+    if coverage_note and not args.json:
+        print(coverage_note, file=sys.stderr)
 
     market_by_id = {r["investmentId"]: r for r in market_results}
     flagged_by_id = {f["investmentId"]: f for f in market_flagged}
@@ -1855,6 +1896,7 @@ def cmd_rebalance_check(args):
             elapsed_seconds=round(time.time() - started, 1),
             positions=rows,
             any_needs_attention=any(r["needs_attention"] for r in rows),
+            market_coverage=market_coverage,
             v4_override_reason=args.allow_v4,
         ), indent=2))
     else:

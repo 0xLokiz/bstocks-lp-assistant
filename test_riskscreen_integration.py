@@ -42,6 +42,7 @@ class FakeBaw:
 
     def __init__(self):
         self.investment_list_page1 = []
+        self.investment_list_total = None  # None -> defaults to len(page1), i.e. not truncated
         self.investment_info = {}       # investmentId -> info dict
         self.protocol_security_score = {}  # defiProtocolId -> score
         self.positions: dict = {"deFiProtocolVOList": []}
@@ -53,7 +54,9 @@ class FakeBaw:
         if head == "defi" and args[1] == "investment-list":
             page = args[args.index("--page") + 1]
             pools = self.investment_list_page1 if page == "1" else []
-            return {"success": True, "data": {"list": pools}}
+            total = (self.investment_list_total if self.investment_list_total is not None
+                     else len(self.investment_list_page1))
+            return {"success": True, "data": {"list": pools, "total": total}}
         if head == "defi" and args[1] == "investment-info":
             inv_id = args[args.index("--investmentId") + 1]
             info = self.investment_info.get(inv_id)
@@ -143,7 +146,7 @@ def test_run_scan_clean_stablecoin_pool(fake_io):
          {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}])
     fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     assert unscoreable == []
     assert flagged == []
@@ -169,7 +172,7 @@ def test_run_scan_blocks_v4_generation_pool_pancakeswap_infinity_fixture(fake_io
          {"tokenAddress": gme_token()["contractAddress"], "tokenSymbol": "GMEB"}])
     fg.klines[("56", gme_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.005)
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     assert results == []
     assert unscoreable == []
@@ -189,7 +192,7 @@ def test_run_scan_allow_v4_override_unblocks_pancakeswap_infinity(fake_io):
          {"tokenAddress": gme_token()["contractAddress"], "tokenSymbol": "GMEB"}])
     fg.klines[("56", gme_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.005)
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1, block_unknown_v4_hooks=False)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1, block_unknown_v4_hooks=False)
 
     assert flagged == []
     assert len(results) == 1
@@ -207,7 +210,7 @@ def test_run_scan_non_stablecoin_pair_scores_relative_volatility(fake_io):
     fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
     fg.klines[("56", BNB_NATIVE.lower())] = make_price_klines(60, daily_return=0.003)
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     assert unscoreable == []
     assert len(results) == 1
@@ -224,7 +227,7 @@ def test_run_scan_unsupported_three_asset_pool_goes_to_unscoreable(fake_io):
          {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"},
          {"tokenAddress": BNB_NATIVE, "tokenSymbol": "BNB"}])
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     assert results == []
     assert flagged == []
@@ -238,7 +241,7 @@ def test_run_scan_investment_info_fetch_failure_reported_not_dropped(fake_io):
     # investmentId deliberately absent from fb.investment_info -> FakeBaw returns success=False
     fb.investment_list_page1 = [pool_entry("inv_missing", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     assert results == []
     assert flagged == []
@@ -261,12 +264,49 @@ def test_run_scan_peer_outlier_apy_flagged(fake_io):
                                                     asset_list, apy_bps=100000)
     fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
 
-    results, flagged, unscoreable = riskscreen.run_scan(max_pages=1)
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
 
     flagged_ids = {f["investmentId"] for f in flagged}
     result_ids = {r["investmentId"] for r in results}
     assert "inv_outlier" in flagged_ids
     assert "inv_normal" in result_ids
+
+
+def test_run_scan_coverage_reports_truncation_when_max_pages_cuts_scan_short(fake_io):
+    # Real gap this locks in: answering "did the scan cover every bStock pool?" used to require
+    # a live manual investigation (see README) because nothing distinguished "max_pages cut this
+    # off, more pools may exist" from "this really is the whole market." The API's own `total`
+    # field (independent of how many pages were fetched) makes that distinction exact.
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry("inv1", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}])
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+    fb.investment_list_total = 250  # far more pools exist system-wide than this 1-pool page
+
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=1)
+
+    assert coverage == {"pools_fetched": 1, "pools_total": 250, "truncated": True}
+
+
+def test_run_scan_coverage_reports_complete_when_last_page_is_short(fake_io):
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry("inv1", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}])
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+    # investment_list_total defaults to len(page1) == 1 -- page came back short, so the scan
+    # already saw the entire market even though max_pages=3 was never fully used.
+
+    results, flagged, unscoreable, coverage = riskscreen.run_scan(max_pages=3)
+
+    assert coverage == {"pools_fetched": 1, "pools_total": 1, "truncated": False}
 
 
 # ---- malformed / missing / type-drifted API responses ----
@@ -337,6 +377,26 @@ def test_scan_json_is_pure_json_with_envelope(fake_io, capsys):
     assert data["status"] == "ok"
     assert "run_id" in data and "as_of" in data
     assert len(data["results"]) == 1
+    assert data["coverage"] == {"pools_fetched": 1, "pools_total": 1, "truncated": False}
+
+
+def test_scan_text_output_notes_truncated_coverage(fake_io, capsys):
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry("inv1", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}])
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+    fb.investment_list_total = 250  # 1-page scan is only a fraction of the full market
+
+    args = riskscreen.build_parser().parse_args(["scan", "--top", "5", "--max-pages", "1"])
+    riskscreen.cmd_scan(args)
+
+    out = capsys.readouterr().out
+    assert "scanned 1/250 LP pools" in out
+    assert "249 more exist" in out
 
 
 def test_positions_json_is_pure_json_with_envelope(fake_io, capsys):
@@ -412,13 +472,17 @@ def test_range_text_output_shows_il_column_and_capital_simulation(fake_io, capsy
 
 # ---- recommend: NO_TRADE, refuse-threshold, position-fetch-failure ----
 
+FAKE_FULL_COVERAGE = {"pools_fetched": 1, "pools_total": 1, "truncated": False}
+
+
 def test_recommend_no_trade_when_nothing_passes_gate(monkeypatch, capsys):
     negative_apy_result = {
         "pool": "NVDAB-USDT", "stock_ticker": "NVDA", "investmentId": "inv1",
         "grade": "Cheap", "model_net_apy": -0.02, "vol_ratio": 1.5, "tvl": 50000,
         "pair_mode": "stablecoin", "verdict": riskscreen.VERDICT_WATCH,
     }
-    monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([negative_apy_result], [], []))
+    monkeypatch.setattr(riskscreen, "run_scan",
+                         lambda **kw: ([negative_apy_result], [], [], FAKE_FULL_COVERAGE))
 
     args = riskscreen.build_parser().parse_args(["recommend"])
     riskscreen.cmd_recommend(args)
@@ -436,7 +500,8 @@ def test_recommend_refuses_when_unscoreable_ratio_too_high(monkeypatch, capsys):
     }
     unscoreable = [{"pool": f"X{i}-USDT", "reason": "investment-info fetch failed (network error)"}
                    for i in range(5)]
-    monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([ok_result], [], unscoreable))
+    monkeypatch.setattr(riskscreen, "run_scan",
+                         lambda **kw: ([ok_result], [], unscoreable, FAKE_FULL_COVERAGE))
 
     args = riskscreen.build_parser().parse_args(["recommend"])
     riskscreen.cmd_recommend(args)
@@ -453,7 +518,7 @@ def test_recommend_does_not_mask_position_fetch_failure_as_no_positions(monkeypa
         "pair_mode": "stablecoin", "best_range": {"pb": None, "confidence": "High", "model_net_apy": 0.3},
         "verdict": riskscreen.VERDICT_ENTER,
     }
-    monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([top_result], [], []))
+    monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([top_result], [], [], FAKE_FULL_COVERAGE))
 
     def boom():
         raise RuntimeError("session expired")
@@ -487,7 +552,7 @@ def test_rebalance_check_evaluates_every_investment_id_worst_case(monkeypatch, c
     def fake_run_scan(**kwargs):
         market_results = [{"investmentId": "good", "stock_ticker": "NVDA", "vol_ratio": 0.3,
                             "apy": 0.4, "model_net_apy": 0.35}]
-        return market_results, [], []
+        return market_results, [], [], FAKE_FULL_COVERAGE
     monkeypatch.setattr(riskscreen, "run_scan", fake_run_scan)
 
     def fake_fetch_investment_info(inv_id):
@@ -529,7 +594,7 @@ def test_rebalance_check_names_best_alternative_and_switch_verdict(monkeypatch, 
              "model_net_apy": 0.35, "pool": "NVDAB-USDT (better)", "protocol": "Uniswap V3",
              "tvl": 80000, "pair_mode": "stablecoin", "grade": "Rich"},
         ]
-        return market_results, [], []
+        return market_results, [], [], FAKE_FULL_COVERAGE
     monkeypatch.setattr(riskscreen, "run_scan", fake_run_scan)
 
     args = riskscreen.build_parser().parse_args(["rebalance-check", "--json"])

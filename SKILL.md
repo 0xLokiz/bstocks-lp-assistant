@@ -356,6 +356,17 @@ number:
 4. **One line tying it together** — why the top pick beats the runners-up
    (better risk-adjusted yield, safer at similar yield, or a real gap in
    TVL/capacity), not just a repeat of the numbers already shown.
+5. **Say so when the scan didn't cover the whole market.** Every `scan`/
+   `recommend`/`rebalance-check` result carries a `coverage` (or
+   `market_coverage`) object — `{pools_fetched, pools_total, truncated}` —
+   and text mode already prints a `NOTE: scanned X/Y LP pools...` line
+   whenever `truncated` is true (`recommend`'s default `--max-pages 1` in
+   particular means this fires most of the time). Don't drop that note
+   when relaying results — a user asking "does this cover every bStock
+   pool?" deserves the exact fetched/total numbers, not a guess. This
+   replaced a real gap: before `pools_total` existed, answering that
+   question took a live manual page-by-page investigation instead of
+   reading a field.
 
 This is the default depth for a recommendation, not an occasional extra —
 scale it down only when the user's question is already narrow (a specific

@@ -304,9 +304,9 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` 总共跑155个测试。`test_riskscreen.py`
+test_riskscreen_integration.py` 总共跑158个测试。`test_riskscreen.py`
 （132个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
-`test_riskscreen_integration.py`（23个）端到端地跑
+`test_riskscreen_integration.py`（26个）端到端地跑
 `run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
 mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
 现；中间的每一个 `fetch_*`/`resolve_*`/`evaluate_*` 函数都是真的在跑。
@@ -510,6 +510,23 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（用户问"这些池子涵盖了所有bStock池子吗？"）
+
+现场调查这个问题时发现：全市场一共有496个LP池子，其中40个名字带
+bStock，`scan`默认的`--max-pages 3`能看到40个里的38个（漏掉的2个都
+是APY接近零的Uniswap V4池子，反正也会被硬性拦截），而`recommend`默
+认的`--max-pages 1`看到的就更少了。输出里完全没有提示这件事——被
+`max_pages`截断和真正扫完全市场，在结果上看起来一模一样。现在从源
+头修复：`fetch_lp_investments`会读取API自带的`total`字段（真实的池
+子总数，跟实际抓了几页无关），和抓到的池子一起返回；`run_scan`会返
+回一个`coverage`（`scan`/`recommend`）/`market_coverage`
+（`rebalance-check`）对象——`{pools_fetched, pools_total, truncated}`
+——贯穿每个命令的`--json`输出。文本模式下，只要扫描确实被截断了，
+就会打印一行`NOTE: scanned X/Y LP pools...`，所以这个答案现在就在输
+出里，不用每次都重新手工调查一遍。
+
+新增3个测试（共158个，此前155个）。
 
 ### 最近完成的（引导线——光靠偏移标签还不够）
 

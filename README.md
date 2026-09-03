@@ -356,9 +356,9 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 155 tests total. `test_riskscreen.py`
+test_riskscreen_integration.py` runs 158 tests total. `test_riskscreen.py`
 (132) covers pure-math/pure-logic functions with no I/O at all.
-`test_riskscreen_integration.py` (23) exercises `run_scan`/`cmd_*` end to
+`test_riskscreen_integration.py` (26) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
 `_get()`, with fake dispatchers keyed by call signature; every
@@ -605,6 +605,25 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (a user asked "does this cover every bStock pool?")
+
+A live investigation to answer that question found: 496 LP pools exist
+system-wide, 40 of them name a bStock, `scan`'s default `--max-pages 3`
+sees 38 of the 40 (the 2 missed were both near-zero-APY Uniswap V4 pools,
+already hard-blocked regardless), and `recommend`'s default `--max-pages
+1` sees far fewer still. Nothing in the output said so — a `max_pages`
+cutoff and genuine market completeness looked identical. Fixed at the
+source: `fetch_lp_investments` now reads the API's own `total` field
+(the true pool count, independent of pages fetched) alongside the pools
+it fetched, and `run_scan` returns a `coverage`
+(`scan`/`recommend`)/`market_coverage` (`rebalance-check`) object —
+`{pools_fetched, pools_total, truncated}` — through every command's
+`--json` output. Text mode prints a `NOTE: scanned X/Y LP pools...` line
+whenever a scan was actually cut short, so the answer is now in the
+output itself instead of requiring a manual re-investigation each time.
+
+3 new tests (158 total, up from 155).
 
 ### Recently shipped (leader lines — offset labels alone weren't enough)
 
