@@ -610,12 +610,24 @@ V4-hook-safety item is tracked in the README Roadmap and remains open.
 
 ## Data sources
 
-| Data              | Source                                                              | Auth |
-|-------------------|-----------------------------------------------------------------------|------|
-| Stock token list   | `bapi/defi/.../rwa/stock/detail/list/ai`                             | none |
-| Token kline (vol)  | `bapi/defi/.../dex/market/token/kline/ai`                            | none |
-| LP pool APY/TVL    | `baw defi investment-list --investType LiquidityPool`                | `baw` session |
-| Pool composition   | `baw defi investment-info --investmentId <id>`                       | `baw` session |
-| Held positions      | `baw defi position`                                                   | `baw` session |
+**Reference only — these are already wrapped, don't call them yourself.**
+Every row below is already fetched, parsed, and error-handled inside
+`riskscreen.py`'s own commands (right-hand column). This table exists so
+you know *what backs a number* when explaining it, not as an invitation to
+`curl`/re-implement the call directly — a hand-rolled version won't have
+the same fallback and retry logic (see the `apy`-is-null note below for a
+concrete example of what that logic is actually doing), and may run in an
+environment with different network access than `riskscreen.py`'s own
+tested path. Confirmed live: a re-implemented direct call to the stock
+token list failed in one execution environment (blocked outbound `curl`)
+in a way `riskscreen.py stocks` — same data, already working — didn't.
+
+| Data              | Source                                                              | Auth | Already wrapped by |
+|-------------------|-----------------------------------------------------------------------|------|---------------------|
+| Stock token list   | `bapi/defi/.../rwa/stock/detail/list/ai`                             | none | `riskscreen.py stocks` |
+| Token kline (vol)  | `bapi/defi/.../dex/market/token/kline/ai`                            | none | `riskscreen.py vol` / `scan` / `range` |
+| LP pool APY/TVL    | `baw defi investment-list --investType LiquidityPool`                | `baw` session | `riskscreen.py scan` |
+| Pool composition   | `baw defi investment-info --investmentId <id>`                       | `baw` session | `riskscreen.py scan` / `range` |
+| Held positions      | `baw defi position`                                                   | `baw` session | `riskscreen.py positions` / `rebalance-check` |
 
 > **`apy` is null for most V3 pools in `investment-list`.** Concentrated-liquidity pools usually report `apy: null/0` there (it's promotional/reward APY only). The real fee-based rate is `investment-info`'s `apyBps` (basis points) / `apyDisplay`. `riskscreen.py` already falls back to `apyBps` — if you're calling these APIs directly instead, do the same, or every V3 stock-token pool will look like a guaranteed loser once IL is netted out.
