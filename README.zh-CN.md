@@ -284,10 +284,32 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 戳）,`scan` 还额外带 `elapsed_seconds`、`flagged`、`unscoreable`。可以直接
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
-**测试**：`pip install -r requirements.txt && pytest test_riskscreen.py`
-跑127个单元测试，覆盖所有纯数学/纯逻辑函数（不需要网络/baw）——CI
-（`.github/workflows/test.yml`）在每次push时会跑这个加上 `py_compile`。每
-个命令的真实数据冒烟测试记录在下面的"运行状态"里。
+**测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
+test_riskscreen_integration.py` 总共跑149个测试。`test_riskscreen.py`
+（127个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
+`test_riskscreen_integration.py`（22个）端到端地跑
+`run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
+mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
+现；中间的每一个 `fetch_*`/`resolve_*`/`evaluate_*` 函数都是真的在跑。
+覆盖了：一个干净池子的完整流程、一个锁定了真实发现的fixture（
+PancakeSwap Infinity 的V4识别案例，这样这个bug就不会悄悄回归）、非稳
+定币配对、不支持的池子结构、格式错误/失败的API响应、`baw()` 的非零退
+出码和shell元字符拒绝路径（不需要真的起一个子进程）、每个命令的
+`--json` 输出有效性（能解析成纯JSON，stdout上没有别的东西）、
+`recommend` 的 `NO_TRADE`/拒绝阈值/仓位读取失败路径、`rebalance-check`
+的多investmentId和best_alternative路径，还有两个跑在几百个随机输入上
+的property风格测试（没引入 `hypothesis` 依赖——纯用 `random` 驱动的循
+环），分别确认 `no_exit_probability` 永远不会跑出 `[0, 1]` 区间、
+`_switching_recommendation` 的美元差距符号永远和它给出的结论一致。CI
+（`.github/workflows/test.yml`）现在在 `ubuntu-latest` **和**
+`windows-latest` 的矩阵上跑这两个文件加 `py_compile`——Windows那一条腿
+才是真正跑到了 `baw()` 里那段Windows专属的 `cmd.exe` 包裹逻辑，之前这
+段代码在CI里完全没有覆盖，尽管它是这个文件里安全最敏感的一段分支。另
+外有一个独立的 `lint` job 跑 `ruff`（选择了哪些规则、为什么，见
+[`ruff.toml`](ruff.toml)）、`mypy`（`check_untyped_defs`，见
+[`mypy.ini`](mypy.ini)——搭建过程中就抓到了 `_get()` 里一个真实的类型
+不一致问题）、以及针对 `requirements.txt` 的 `pip-audit`。每个命令的
+真实数据冒烟测试记录在下面的"运行状态"里。
 
 **执行环节故意不在这个脚本的范围内。** `rebalance-check` 只打印报告，不会
 挪动任何东西。要对某个建议采取行动，走 `binance-agentic-wallet` 的 `defi
@@ -456,6 +478,41 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   `SKILL.md` 里的人工提醒；应该直接调用
   `binance-tokenized-securities-info` 的资产市场状态API，在财报/分红/拆股
   日期落在建议的时间窗口内时，自动放宽有效波动率估计或者直接标红这个池子。
+
+### 最近完成的（测试与工程化缺口，来自同一轮审查）
+
+审查的第四档，收尾了具体的工程化诉求：真正mock了函数之间的连接逻辑
+（不只是函数本身），CI也真正跑到了这个工具自己那项安全修复所在的平台
+专属代码。完整内容见上文"测试"，简单说：
+
+- **`test_riskscreen_integration.py`**（22个测试，新文件）——mock了
+  `baw()`/`_get()` 之后端到端跑 `run_scan`/`cmd_*`：格式错误/失败的
+  API响应、`baw()` 的非零退出码和shell元字符拒绝路径（不需要真的起子
+  进程）、每个命令的 `--json` 输出有效性、`recommend` 的 `NO_TRADE`/
+  拒绝阈值/仓位读取失败路径、`rebalance-check` 的多investmentId和
+  best_alternative路径，还有一个真实fixture（PancakeSwap Infinity）把
+  这轮审查里的一个真实发现锁定成了永久性回归测试。
+- **Property风格测试**，针对 `no_exit_probability`（200个随机参数组合
+  下始终落在 `[0, 1]` 区间内）和 `_switching_recommendation`（美元差距
+  的符号永远和结论一致）——没引入新依赖（`hypothesis`），纯用
+  `random` 驱动的循环。
+- **把 `build_parser()` 从 `main()` 里拆出来**，这样测试就能构造真实
+  的argparse `Namespace` 对象（`build_parser().parse_args([...])`），
+  而不是手搭一个可能悄悄跟真实CLI契约脱节的假对象。
+- **CI矩阵加上了Windows**——之前只有Ubuntu，导致 `baw()` 里那段
+  Windows专属的 `cmd.exe` 包裹分支（正是命令注入修复里最安全敏感的那
+  条分支）在CI里完全没有覆盖。
+- **新增了 `ruff`、`mypy`、`pip-audit`**，作为一个独立的CI `lint`
+  job。把两个工具在真实代码库上发现的问题都修了（`_get()` 里一个类型
+  不一致的变量、几处缺失的dict类型标注、多余的f-string前缀、一个不必
+  要的 `open()` mode参数、几个容易看错的单字母OHLC变量名），而不是加
+  了工具就把已有的问题晾在那不管。`ruff.toml`/`mypy.ini` 刻意排除了几
+  类跟这个代码库故意选择的风格相冲突的规则（尤其是I/O边界上"broad但
+  会被翻译成明确错误"的异常处理）——都在各自的配置文件里写清楚了原
+  因，不是悄悄压掉。
+
+新增22个测试（总共149个，此前127个）。这一节里的每一项检查都先在真实
+代码库上本地跑通过，才加进CI，不是先加进CI再等着它报错。
 
 ### 最近完成的（稳定性、速度与可观测性，来自同一轮审查）
 

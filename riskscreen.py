@@ -112,7 +112,7 @@ def _get(url, params, max_retries=HTTP_MAX_RETRIES):
     """
     query = urllib.parse.urlencode(params)
     full_url = f"{url}?{query}"
-    last_error = None
+    last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
             req = urllib.request.Request(full_url, headers={"Accept-Encoding": "identity", "User-Agent": UA})
@@ -142,7 +142,7 @@ def _get(url, params, max_retries=HTTP_MAX_RETRIES):
 BSTOCK_TYPE = 3  # RWA list `type`: 1=Ondo ("...on"), 2=xStocks ("...x"), 3=bStock ("...B")
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def fetch_stock_tokens(type_filter=BSTOCK_TYPE):
     """Defaults to bStock (type=3) only -- this product is scoped to bStocks specifically,
     not tokenized-stock LPs on other providers. Pass type_filter=None for every platform,
@@ -162,7 +162,7 @@ def fetch_stock_tokens(type_filter=BSTOCK_TYPE):
     return body["data"]
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def fetch_klines(chain_id, contract_address, interval="1d", limit=90):
     """Memoized in-process for the same reason as fetch_stock_tokens: the same token's klines
     can be requested more than once per command (run_scan's own batch plus a held-position
@@ -206,9 +206,9 @@ def annualized_volatility(klines, interval="1d"):
     return _log_return_volatility(closes, interval)
 
 
-def _rogers_satchell_variance(o, h, l, c):
+def _rogers_satchell_variance(o, h, lo, c):
     """Per-candle Rogers-Satchell variance term -- drift-independent (Rogers & Satchell, 1991)."""
-    return math.log(h / c) * math.log(h / o) + math.log(l / c) * math.log(l / o)
+    return math.log(h / c) * math.log(h / o) + math.log(lo / c) * math.log(lo / o)
 
 
 def yang_zhang_volatility(klines, interval="1d"):
@@ -285,7 +285,7 @@ def _load_stablecoin_addresses(config_path=None):
     """
     path = config_path or os.environ.get(STABLECOIN_CONFIG_ENV_VAR) or DEFAULT_STABLECOIN_CONFIG_PATH
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return {(str(e["chainId"]), e["address"].lower()) for e in data["stablecoins"]}
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -722,7 +722,10 @@ def baw(*args):
         cmd = [comspec, "/d", "/c", f"chcp 65001>nul & {inner}"]
     else:
         cmd = [baw_path, *validated, "--json"]
-    result = subprocess.run(cmd, capture_output=True, timeout=30, shell=False,
+    # check=False (explicit): a nonzero exit is handled below via stdout/returncode inspection,
+    # not by letting subprocess.run raise CalledProcessError -- baw can exit nonzero while still
+    # writing a useful --json error body to stdout, which check=True would discard.
+    result = subprocess.run(cmd, capture_output=True, timeout=30, shell=False, check=False,
                              text=True, encoding="utf-8", errors="replace")
     stdout = result.stdout.strip()
     if not stdout:
@@ -1108,8 +1111,8 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             # model to a pool this tool can't actually model. Skip rather than silently
             # mis-score it.
             unscoreable.append((pool.get("investmentName"),
-                                 "assetTokenList did not confirm exactly one bStock paired with one other asset "
-                                 "(unsupported pool structure)"))
+                                 ("assetTokenList did not confirm exactly one bStock paired with one other asset "
+                                  "(unsupported pool structure)")))
             continue
         resolved.append((pool, info, stock, chain_id, quote_addr, pair_mode))
         kline_keys.add((stock["chainId"], stock["contractAddress"]))
@@ -1189,11 +1192,11 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
     # Pass 2: apply the risk/plausibility screen with full peer context, then score the survivors.
     # Keyed by investmentId (not just apy value) so a pool excludes only itself as a "peer" --
     # two distinct pools that happen to share an apy must not exclude each other.
-    entries_by_ticker = {}
+    entries_by_ticker: dict[str, list[tuple[str, float]]] = {}
     for p in prepared:
         entries_by_ticker.setdefault(p["stock"]["ticker"], []).append((p["pool"]["investmentId"], p["apy"]))
 
-    security_score_cache = {}
+    security_score_cache: dict[str, float | None] = {}
     results = []
     flagged = []
     for p in prepared:
@@ -1400,8 +1403,8 @@ def cmd_range(args):
             marker = "  <- recommended" if r is best else ""
             print(f"{width:>10}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
                   f"{r['effective_apy']*100:>9.2f}%{r['model_net_apy']*100:>9.2f}%{marker}")
-        print(f"\n(confidence = probability of staying in range a year, bucketed High/Moderate/Low; "
-              f"recommended = best net_apy at Moderate-or-better confidence. Full numbers: --json on scan.)")
+        print("\n(confidence = probability of staying in range a year, bucketed High/Moderate/Low; "
+              "recommended = best net_apy at Moderate-or-better confidence. Full numbers: --json on scan.)")
     else:
         print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'confidence':>12}{'net_apy':>10}")
         for r in rows:
@@ -1415,13 +1418,13 @@ def cmd_range(args):
         print(f"\n(yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order -- earns fees "
               f"only once price {verb} the band; confidence = probability that ever happens within a year.)")
         if args.target_offset is None:
-            print(f"(want an exact target instead of these presets? add "
-                  f"--target-offset 0.15 for +/-15% from current price, plus optional --band-width.)")
+            print("(want an exact target instead of these presets? add "
+                  "--target-offset 0.15 for +/-15% from current price, plus optional --band-width.)")
 
     if args.capital:
         if pool_tvl is None:
-            print(f"\n(--capital given, but this is a --ticker/--apy estimate with no live pool "
-                  f"TVL to size a position against -- use --investmentId for position sizing.)")
+            print("\n(--capital given, but this is a --ticker/--apy estimate with no live pool "
+                  "TVL to size a position against -- use --investmentId for position sizing.)")
         else:
             note = position_sizing_note(args.capital, pool_tvl, best["model_net_apy"])
             print(f"\nAt ${args.capital:,.0f} in the recommended range: "
@@ -1858,7 +1861,10 @@ def _v4_override_reason(s):
     return s
 
 
-def main():
+def build_parser():
+    """Split out from main() so tests can build a real argparse Namespace
+    (build_parser().parse_args([...])) instead of hand-constructing one -- guarantees test args
+    match the actual CLI contract (including every default) and can't silently drift from it."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1948,7 +1954,11 @@ def main():
                                    "(e.g. --allow-v4 \"audited by X\")")
     p_recommend.set_defaults(func=cmd_recommend)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     args.func(args)
 
 

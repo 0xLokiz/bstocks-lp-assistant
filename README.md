@@ -334,11 +334,36 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 `unscoreable`. Safe to pipe directly into `jq` or a scheduler without
 stripping table text out of it first.
 
-**Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py`
-runs 127 unit tests over the pure-math/pure-logic functions (no network/baw
-needed) — CI (`.github/workflows/test.yml`) runs this plus `py_compile` on
-every push. Live-data smoke tests for every command
-are documented in "Status" below.
+**Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
+test_riskscreen_integration.py` runs 149 tests total. `test_riskscreen.py`
+(127) covers pure-math/pure-logic functions with no I/O at all.
+`test_riskscreen_integration.py` (22) exercises `run_scan`/`cmd_*` end to
+end — including the exact evaluation pipeline, JSON output, and CLI
+argument parsing — by mocking only the two leaf I/O functions, `baw()` and
+`_get()`, with fake dispatchers keyed by call signature; every
+`fetch_*`/`resolve_*`/`evaluate_*` function in between runs for real. It
+covers a clean pool end to end, a real fixture that locks in a live
+finding (the PancakeSwap Infinity V4-detection case, so that bug can't
+silently come back), non-stablecoin pairs, unsupported pool structures,
+malformed/failed API responses, `baw()`'s nonzero-exit and
+shell-metacharacter-rejection paths, `--json` output validity (parses as
+pure JSON with nothing else on stdout) on every command, `recommend`'s
+`NO_TRADE`/refuse-threshold/position-fetch-failure paths,
+`rebalance-check`'s multi-investmentId and best-alternative paths, and two
+property-style checks run against hundreds of randomized inputs (no
+`hypothesis` dependency — plain `random`-driven loops) confirming
+`no_exit_probability` never leaves `[0, 1]` and
+`_switching_recommendation`'s dollar-gap sign always matches its verdict.
+CI (`.github/workflows/test.yml`) runs both files plus `py_compile` on a
+`ubuntu-latest` **and** `windows-latest` matrix — the Windows leg is what
+actually exercises `baw()`'s Windows-specific `cmd.exe`-wrapping code path
+in CI, previously untested there entirely despite being the most
+security-sensitive branch in the file. A separate `lint` job runs `ruff`
+(see [`ruff.toml`](ruff.toml) for the deliberately-scoped rule selection
+and why), `mypy` (`check_untyped_defs`, see [`mypy.ini`](mypy.ini) — caught
+a real type inconsistency in `_get()` during setup), and `pip-audit`
+against `requirements.txt`. Live-data smoke tests for every command are
+documented in "Status" below.
 
 **Execution is intentionally out of scope for this script.** `rebalance-check`
 prints a report and moves nothing. To act on any recommendation, run
@@ -542,6 +567,49 @@ already built.
   direct call to `binance-tokenized-securities-info`'s asset-market-status
   API that widens the effective vol estimate or flags the pool outright when
   an earnings/dividend/split date falls inside the recommendation horizon.
+
+### Recently shipped (testing & engineering gaps, from the same review)
+
+The review's fourth tier, closing out its concrete engineering asks: real
+mocked coverage of the wiring between functions (not just the functions
+themselves), and CI that actually exercises the platform-specific code
+this tool's own security fix lives in. See "Testing" above for the full
+picture; in brief:
+
+- **`test_riskscreen_integration.py`** (22 tests, new file) — mocked
+  `baw()`/`_get()` integration tests for `run_scan`/`cmd_*` end to end:
+  malformed/failed API responses, `baw()`'s nonzero-exit and
+  shell-metacharacter-rejection paths without a real subprocess, `--json`
+  output validity on every command, `recommend`'s `NO_TRADE`/
+  refuse-threshold/position-fetch-failure paths, `rebalance-check`'s
+  multi-investmentId and best-alternative paths, and a real fixture
+  (PancakeSwap Infinity) locking in a live finding from this review as a
+  permanent regression test.
+- **Property-style tests** for `no_exit_probability` (stays in `[0, 1]`
+  across 200 randomized parameter combinations) and
+  `_switching_recommendation` (dollar-gap sign always matches its verdict)
+  — no new dependency (`hypothesis`), plain `random`-driven loops.
+- **`build_parser()` split out of `main()`** so tests build real argparse
+  `Namespace` objects (`build_parser().parse_args([...])`) instead of
+  hand-constructing ones that can silently drift from the actual CLI.
+- **Windows added to the CI matrix** — previously Ubuntu-only, so `baw()`'s
+  Windows-specific `cmd.exe`-wrapping branch (the security-sensitive one
+  from the command-injection fix) had zero CI coverage despite being the
+  most sensitive code path in the file.
+- **`ruff`, `mypy`, and `pip-audit`** added as a separate CI `lint` job.
+  Fixed everything both tools found on the actual codebase (an
+  inconsistently-typed variable in `_get()`, a couple of missing dict
+  annotations, redundant f-strings, an unnecessary `open()` mode argument,
+  ambiguous single-letter OHLC variable names) rather than just adding the
+  tools and leaving pre-existing findings unaddressed. `ruff.toml`/
+  `mypy.ini` deliberately scope out a few rule families that fight this
+  codebase's intentional style (broad-but-translated exception handling
+  at I/O boundaries, in particular) — documented inline in each config
+  file, not silently suppressed.
+
+22 new tests (149 total, up from 127). Every check in this section was
+run locally against the real codebase before being added to CI, not
+added speculatively and left to fail in CI first.
 
 ### Recently shipped (stability, speed & observability, from the same review)
 

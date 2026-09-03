@@ -13,6 +13,24 @@ import random
 import pytest
 
 from riskscreen import (
+    SCHEMA_VERSION,
+    SWITCH_PAYBACK_DAYS_WORTHWHILE,
+    _apy_fraction,
+    _best_alternative_for_ticker,
+    _exact_double_barrier_no_exit_probability,
+    _il_at_price_ratio,
+    _json_envelope,
+    _load_stablecoin_addresses,
+    _nonneg_float,
+    _offset_fraction,
+    _peer_apys_for_ticker,
+    _positive_int,
+    _rogers_satchell_variance,
+    _single_barrier_touch_probability,
+    _summarize_unscoreable,
+    _switching_recommendation,
+    _union_bound_no_exit_probability,
+    _v4_override_reason,
     annualized_volatility,
     best_available_volatility,
     breakeven_volatility,
@@ -31,24 +49,6 @@ from riskscreen import (
     richness_grade,
     vol_richness_ratio,
     yang_zhang_volatility,
-    _apy_fraction,
-    _best_alternative_for_ticker,
-    _exact_double_barrier_no_exit_probability,
-    _il_at_price_ratio,
-    _json_envelope,
-    _load_stablecoin_addresses,
-    _nonneg_float,
-    _offset_fraction,
-    _peer_apys_for_ticker,
-    _positive_int,
-    _rogers_satchell_variance,
-    _single_barrier_touch_probability,
-    _summarize_unscoreable,
-    _switching_recommendation,
-    _union_bound_no_exit_probability,
-    _v4_override_reason,
-    SCHEMA_VERSION,
-    SWITCH_PAYBACK_DAYS_WORTHWHILE,
 )
 
 
@@ -59,7 +59,7 @@ def make_klines(closes):
 
 def make_ohlc_klines(rows):
     """rows: list of (open, high, low, close) tuples -> full kline rows."""
-    return [[i, str(o), str(h), str(l), str(c), "0", i] for i, (o, h, l, c) in enumerate(rows)]
+    return [[i, str(o), str(h), str(lo), str(c), "0", i] for i, (o, h, lo, c) in enumerate(rows)]
 
 
 # ---- annualized_volatility ----
@@ -825,7 +825,7 @@ def test_rogers_satchell_zero_for_flat_candle():
 
 
 def test_rogers_satchell_positive_for_normal_candle():
-    assert _rogers_satchell_variance(o=100, h=105, l=98, c=102) > 0
+    assert _rogers_satchell_variance(o=100, h=105, lo=98, c=102) > 0
 
 
 def test_yang_zhang_needs_at_least_3_candles():

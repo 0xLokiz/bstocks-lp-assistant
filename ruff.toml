@@ -1,0 +1,26 @@
+# Ruff configuration for bStocks LP Assistant.
+#
+# Rule selection is deliberately narrower than "select everything": E/F/W (pycodestyle +
+# pyflakes) catch real bugs -- undefined names, unused imports/variables, syntax issues; I sorts
+# imports; UP flags outdated Python idioms. A few broader rule families this codebase
+# intentionally does not opt into, and why:
+#
+#   - BLE001 (blind except): this codebase catches `Exception` broadly and on purpose at every
+#     subprocess/network/baw call-site boundary (see baw()'s and _get()'s docstrings, and every
+#     cmd_*'s top-level error handling) -- the specific exception type isn't knowable ahead of
+#     time for a subprocess or HTTP boundary, and every broad catch here is paired with a
+#     translated, diagnosable error message, never a silent pass (except the two documented,
+#     deliberate exceptions in run_scan's concurrent-fetch loops, which use `except Exception as
+#     e:` specifically to classify the failure, not swallow it).
+#   - TRY004 (prefer TypeError for a type check): _get()'s isinstance check deliberately raises
+#     RuntimeError for consistency with every other failure mode in that same function.
+#   - RUF059 (unused unpacked variable): common and fine in tests, where a tuple is destructured
+#     for readability even when a given test doesn't assert on every field.
+#   - PLW1510 (subprocess.run without check): baw() passes check=False explicitly and handles
+#     returncode itself -- already correct, not what this rule is for.
+target-version = "py310"
+
+exclude = ["docs"]  # WIP, untracked tutorial-PDF scripts -- not part of the shipped tool
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
