@@ -67,17 +67,35 @@ stablecoin-pair result and a non-stablecoin-pair result with the same
 confidence language — they're different models with different reliability,
 even when the printed grade looks the same.
 
-## NO_TRADE is a real, expected outcome
+## Every pool is ENTER, WATCH, NO_TRADE, or UNSCOREABLE
 
-`recommend` gates a "Top pick" behind `passes_trade_gate()`: positive
-`model_net_apy` **and** `vol_ratio < 1` (not graded Cheap). Passing the
-pre-deposit safety screen (being in `results` at all) answers "is this
-plausible and safe to consider" — the trade gate answers "is it actually
-worth doing." When nothing clears both bars, `recommend` prints `NO_TRADE`
-with the specific reason(s), not a downgraded "Top pick." **Treat `NO_TRADE`
-as a legitimate, informative answer, not a failure to relay to the user
-apologetically** — it's the model doing its job when the market genuinely
-doesn't offer a clean opportunity right now.
+Every pool this skill reports on carries a `verdict` field with exactly
+one of these four values — use it, don't reconstruct the same judgment
+from grade/flags/vol_ratio yourself:
+
+- **`ENTER`** — cleared `passes_trade_gate()`: positive `model_net_apy`
+  **and** `vol_ratio < 1` (not graded Cheap). This is what `recommend`'s
+  "Top pick" is drawn from.
+- **`WATCH`** — passed the pre-deposit safety screen (a legitimate pool)
+  but doesn't clear the trade gate right now. **Present this as "not
+  attractive today," not as a warning** — nothing is wrong with the pool,
+  the numbers just don't currently clear the bar. `recommend` surfaces a
+  count of these; mention it if the user asks what else exists besides
+  the Top pick.
+- **`NO_TRADE`** — either a specific pool failed the pre-deposit
+  safety/plausibility screen (avoid it, and say why), or (for `recommend`
+  specifically) nothing at all cleared the trade gate market-wide. **Treat
+  a market-wide `NO_TRADE` as a legitimate, informative answer, not a
+  failure to relay to the user apologetically** — it's the model doing its
+  job when the market genuinely doesn't offer a clean opportunity right
+  now.
+- **`UNSCOREABLE`** — never evaluated at all (fetch failed, no confirmed
+  bStock, insufficient kline data). **Never present this as if it were a
+  safety verdict** — "we don't know" and "we checked, it's not worth it"
+  are different claims. If too much of the market is `UNSCOREABLE`,
+  `recommend` refuses to give any verdict at all rather than picking from
+  an unrepresentative scoreable remainder — relay that refusal plainly,
+  don't paper over it with whatever partial results exist.
 
 ## Uniswap V4 pools are hard-blocked by default
 

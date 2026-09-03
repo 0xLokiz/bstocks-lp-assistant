@@ -152,6 +152,7 @@ def test_run_scan_clean_stablecoin_pool(fake_io):
     assert results[0]["pair_mode"] == "stablecoin"
     assert results[0]["stock_ticker"] == "NVDA"
     assert results[0]["model_net_apy"] > 0
+    assert results[0]["verdict"] == riskscreen.VERDICT_ENTER
 
 
 def test_run_scan_blocks_v4_generation_pool_pancakeswap_infinity_fixture(fake_io):
@@ -175,6 +176,7 @@ def test_run_scan_blocks_v4_generation_pool_pancakeswap_infinity_fixture(fake_io
     assert len(flagged) == 1
     assert flagged[0]["investmentId"] == "inv_infinity"
     assert any("V4-generation" in f for f in flagged[0]["flags"])
+    assert flagged[0]["verdict"] == riskscreen.VERDICT_NO_TRADE
 
 
 def test_run_scan_allow_v4_override_unblocks_pancakeswap_infinity(fake_io):
@@ -242,6 +244,7 @@ def test_run_scan_investment_info_fetch_failure_reported_not_dropped(fake_io):
     assert flagged == []
     assert len(unscoreable) == 1
     assert "investment-info fetch failed" in unscoreable[0]["reason"]
+    assert unscoreable[0]["verdict"] == riskscreen.VERDICT_UNSCOREABLE
 
 
 def test_run_scan_peer_outlier_apy_flagged(fake_io):
@@ -370,7 +373,7 @@ def test_recommend_no_trade_when_nothing_passes_gate(monkeypatch, capsys):
     negative_apy_result = {
         "pool": "NVDAB-USDT", "stock_ticker": "NVDA", "investmentId": "inv1",
         "grade": "Cheap", "model_net_apy": -0.02, "vol_ratio": 1.5, "tvl": 50000,
-        "pair_mode": "stablecoin",
+        "pair_mode": "stablecoin", "verdict": riskscreen.VERDICT_WATCH,
     }
     monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([negative_apy_result], [], []))
 
@@ -386,7 +389,7 @@ def test_recommend_refuses_when_unscoreable_ratio_too_high(monkeypatch, capsys):
     ok_result = {
         "pool": "NVDAB-USDT", "stock_ticker": "NVDA", "investmentId": "inv1",
         "grade": "Rich", "model_net_apy": 0.3, "vol_ratio": 0.2, "tvl": 50000,
-        "pair_mode": "stablecoin",
+        "pair_mode": "stablecoin", "verdict": riskscreen.VERDICT_ENTER,
     }
     unscoreable = [{"pool": f"X{i}-USDT", "reason": "investment-info fetch failed (network error)"}
                    for i in range(5)]
@@ -405,6 +408,7 @@ def test_recommend_does_not_mask_position_fetch_failure_as_no_positions(monkeypa
         "pool": "NVDAB-USDT", "stock_ticker": "NVDA", "investmentId": "inv1",
         "grade": "Rich", "model_net_apy": 0.3, "vol_ratio": 0.2, "tvl": 50000,
         "pair_mode": "stablecoin", "best_range": {"pb": None, "confidence": "High", "model_net_apy": 0.3},
+        "verdict": riskscreen.VERDICT_ENTER,
     }
     monkeypatch.setattr(riskscreen, "run_scan", lambda **kw: ([top_result], [], []))
 

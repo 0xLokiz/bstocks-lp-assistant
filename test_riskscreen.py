@@ -15,6 +15,8 @@ import pytest
 from riskscreen import (
     SCHEMA_VERSION,
     SWITCH_PAYBACK_DAYS_WORTHWHILE,
+    VERDICT_ENTER,
+    VERDICT_WATCH,
     _apy_fraction,
     _best_alternative_for_ticker,
     _exact_double_barrier_no_exit_probability,
@@ -34,6 +36,7 @@ from riskscreen import (
     annualized_volatility,
     best_available_volatility,
     breakeven_volatility,
+    classify_verdict,
     concentration_multiplier,
     confidence_grade,
     evaluate_pool,
@@ -752,6 +755,37 @@ def test_passes_trade_gate_false_for_cheap_grade():
 def test_passes_trade_gate_false_for_unknown_vol_ratio():
     result = {"model_net_apy": 0.1, "vol_ratio": None}
     assert not passes_trade_gate(result)
+
+
+# ---- classify_verdict (the ENTER/WATCH/NO_TRADE/UNSCOREABLE reframing) ----
+
+def test_classify_verdict_enter_when_trade_gate_passes():
+    scored = {"model_net_apy": 0.3, "vol_ratio": 0.2}
+    assert classify_verdict(scored) == VERDICT_ENTER
+
+
+def test_classify_verdict_watch_when_negative_net_apy():
+    scored = {"model_net_apy": -0.01, "vol_ratio": 0.2}
+    assert classify_verdict(scored) == VERDICT_WATCH
+
+
+def test_classify_verdict_watch_when_cheap_grade():
+    scored = {"model_net_apy": 0.1, "vol_ratio": 1.5}
+    assert classify_verdict(scored) == VERDICT_WATCH
+
+
+def test_classify_verdict_watch_when_vol_ratio_unknown():
+    scored = {"model_net_apy": 0.1, "vol_ratio": None}
+    assert classify_verdict(scored) == VERDICT_WATCH
+
+
+def test_classify_verdict_never_returns_no_trade_or_unscoreable():
+    # classify_verdict only ever sees pools that already passed the pre-deposit safety screen
+    # (run_scan assigns NO_TRADE/UNSCOREABLE directly, before this function is even called) --
+    # it should never itself produce those two labels.
+    for model_net_apy, vol_ratio in [(0.3, 0.2), (-0.5, 2.0), (0.0, None), (1.0, 0.99)]:
+        verdict = classify_verdict({"model_net_apy": model_net_apy, "vol_ratio": vol_ratio})
+        assert verdict in (VERDICT_ENTER, VERDICT_WATCH)
 
 
 # ---- CLI argument validators ----

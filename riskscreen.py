@@ -1211,7 +1211,8 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
                                     block_unknown_v4_hooks=block_unknown_v4_hooks)
         if evaluation["flags"]:
             flagged.append({"investmentId": pool.get("investmentId"), "pool": pool.get("investmentName"),
-                             "protocol": pool.get("protocolName"), "flags": evaluation["flags"]})
+                             "protocol": pool.get("protocolName"), "flags": evaluation["flags"],
+                             "verdict": VERDICT_NO_TRADE})
             continue
 
         scored = evaluation["scored"]
@@ -1222,6 +1223,7 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
             "stock_ticker": stock["ticker"],
             "tvl": float(pool.get("tvl") or 0),
             "grade": richness_grade(scored["vol_ratio"]),
+            "verdict": classify_verdict(scored),
             "pair_mode": p["pair_mode"],
             **scored,
         }
@@ -1232,7 +1234,7 @@ def run_scan(max_pages=3, max_fee_rate=MAX_SANE_FEE_RATE, min_tvl=MIN_SANE_TVL_U
         results.append(result)
 
     results.sort(key=lambda r: r["model_net_apy"], reverse=True)
-    unscoreable_dicts = [{"pool": name, "reason": reason} for name, reason in unscoreable]
+    unscoreable_dicts = [{"pool": name, "reason": reason, "verdict": VERDICT_UNSCOREABLE} for name, reason in unscoreable]
     return results, flagged, unscoreable_dicts
 
 
@@ -1277,7 +1279,7 @@ def cmd_scan(args):
 
     if args.with_range:
         print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'grade':>7}"
-              f"{'best +/-%':>10}{'range-net':>11}{'confidence':>12}{'tvl':>14}")
+              f"{'best +/-%':>10}{'range-net':>11}{'confidence':>12}{'tvl':>14}  verdict")
         for r in results[: args.top]:
             b = r["best_range"]
             width = f"{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full"
@@ -1285,23 +1287,26 @@ def cmd_scan(args):
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['grade']:>7}"
                   f"{width:>10}{b['model_net_apy']*100:>10.2f}%{b['confidence']:>12}"
-                  f"{r['tvl']:>14,.0f}{tag}")
+                  f"{r['tvl']:>14,.0f}  {r['verdict']}{tag}")
         print("\n(grade = Richness Score tier, vol_ratio bucketed Rich/Fair/Cheap; "
               "confidence = probability of the recommended range staying active a year, "
-              "bucketed High/Moderate/Low. [non-stablecoin pair] = vol is the *relative* "
-              "vol between the two pooled assets, not the bStock alone -- see README. "
-              "Full numbers: --json.)")
+              "bucketed High/Moderate/Low. verdict = ENTER (clears the trade gate) or WATCH "
+              "(safe but not attractive right now). [non-stablecoin pair] = vol is the "
+              "*relative* vol between the two pooled assets, not the bStock alone -- see "
+              "README. Full numbers: --json.)")
     else:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}")
+        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}  verdict")
         for r in results[: args.top]:
             tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
             print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
                   f"{r['model_net_apy']*100:>9.2f}%{r['grade']:>7}"
-                  f"{r['tvl']:>14,.0f}{tag}")
+                  f"{r['tvl']:>14,.0f}  {r['verdict']}{tag}")
         print("\n(grade = Richness Score tier -- realized vol vs. this pool's breakeven vol, "
-              "bucketed Rich/Fair/Cheap. [non-stablecoin pair] = vol is the *relative* vol "
-              "between the two pooled assets, not the bStock alone -- see README. Full numbers: --json.)")
+              "bucketed Rich/Fair/Cheap. verdict = ENTER (clears the trade gate) or WATCH "
+              "(safe but not attractive right now). [non-stablecoin pair] = vol is the "
+              "*relative* vol between the two pooled assets, not the bStock alone -- see "
+              "README. Full numbers: --json.)")
 
     if capital_note:
         top = results[0]
@@ -1444,6 +1449,29 @@ def passes_trade_gate(result):
     return result["model_net_apy"] > 0 and result["vol_ratio"] is not None and result["vol_ratio"] < 1
 
 
+VERDICT_ENTER = "ENTER"
+VERDICT_WATCH = "WATCH"
+VERDICT_NO_TRADE = "NO_TRADE"
+VERDICT_UNSCOREABLE = "UNSCOREABLE"
+
+
+def classify_verdict(scored):
+    """The one-of-four-labels reframing: every pool riskscreen.py ever reports on ends up as
+    ENTER, WATCH, NO_TRADE, or UNSCOREABLE, so a caller can filter/sort on one field instead of
+    reconstructing the same logic scattered across grade/flags/vol_ratio checks.
+
+    This function only classifies the two "was actually scored" outcomes (ENTER vs WATCH) --
+    NO_TRADE and UNSCOREABLE are assigned directly by run_scan at the point a pool gets flagged
+    or fails to resolve, since there's no `scored` data to classify at that point. Built
+    directly on passes_trade_gate's existing logic (same gate, just labeled) rather than a new
+    threshold: ENTER when the pool clears it (positive model_net_apy AND vol_ratio < 1), WATCH
+    otherwise. A WATCH pool already passed the pre-deposit safety screen (this is only ever
+    called on `results` rows, never `flagged` ones) -- it's a legitimate pool, just not
+    economically attractive right now, worth watching in case apy/vol shifts, not avoiding.
+    """
+    return VERDICT_ENTER if passes_trade_gate(scored) else VERDICT_WATCH
+
+
 UNSCOREABLE_RATIO_REFUSE_THRESHOLD = 0.5  # refuse a verdict when more than half the candidate
                                             # pools couldn't even be evaluated -- the scoreable
                                             # remainder may not be representative of the market
@@ -1463,7 +1491,7 @@ def cmd_recommend(args):
 
     total_candidates = len(results) + len(flagged) + len(unscoreable)
     if total_candidates and len(unscoreable) / total_candidates > UNSCOREABLE_RATIO_REFUSE_THRESHOLD:
-        print(f"NO_TRADE -- {len(unscoreable)}/{total_candidates} candidate pools could not even be "
+        print(f"{VERDICT_NO_TRADE} -- {len(unscoreable)}/{total_candidates} candidate pools could not even be "
               f"evaluated (data/coverage issue, not a safety verdict). That's too much of the market "
               f"unaccounted for to trust a verdict from the scoreable remainder right now.")
         print(f"({_summarize_unscoreable(unscoreable)})")
@@ -1471,14 +1499,15 @@ def cmd_recommend(args):
         return
 
     if not results:
-        print("NO_TRADE -- no bStock LP pools passed the pre-deposit screen right now.")
+        print(f"{VERDICT_NO_TRADE} -- no bStock LP pools passed the pre-deposit screen right now.")
         if flagged:
             print(f"({len(flagged)} pool(s) were excluded -- run `scan --with-range` for details.)")
         if unscoreable:
             print(f"({len(unscoreable)} pool(s) could not even be evaluated -- data/coverage issue, not a safety verdict.)")
         return
 
-    tradeable = [r for r in results if passes_trade_gate(r)]
+    tradeable = [r for r in results if r["verdict"] == VERDICT_ENTER]
+    watch_list = [r for r in results if r["verdict"] == VERDICT_WATCH]
     if not tradeable:
         best = results[0]
         reasons = []
@@ -1488,11 +1517,14 @@ def cmd_recommend(args):
             vr_str = f"{best['vol_ratio']:.2f}" if best["vol_ratio"] is not None else "n/a"
             reasons.append(f"best candidate grades {best['grade']} (vol_ratio {vr_str}) -- "
                             f"fee income likely doesn't cover realized risk")
-        print("NO_TRADE -- nothing currently clears the bar (positive net APY and vol_ratio < 1).")
+        print(f"{VERDICT_NO_TRADE} -- nothing currently clears the bar (positive net APY and vol_ratio < 1).")
         for r in reasons:
             print(f"  - {r}")
         print(f"\nClosest candidate for reference: {best['pool']} ({best['stock_ticker']}), "
               f"{best['grade']}, {best['model_net_apy']*100:.1f}% net APY. Not a recommendation.")
+        if watch_list:
+            print(f"\n{len(watch_list)} pool(s) safe but not attractive right now ({VERDICT_WATCH}) -- "
+                  f"see `scan --with-range` to browse them.")
         print(f"\n{MODEL_APY_CAVEAT}")
         return
 
@@ -1500,12 +1532,16 @@ def cmd_recommend(args):
     b = top["best_range"]
     width = f"+/-{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full range"
     pair_note = "" if top["pair_mode"] == "stablecoin" else " (non-stablecoin pair -- vol is relative to the quote asset, see README)"
-    print(f"Top pick: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
+    print(f"{VERDICT_ENTER}: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
           f"{width} range at {b['confidence']} confidence, {b['model_net_apy']*100:.1f}% net APY.{pair_note}\n")
 
-    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}")
+    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}  verdict")
     for r in results[:3]:
-        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['model_net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}")
+        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['model_net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}  {r['verdict']}")
+
+    if watch_list:
+        print(f"\n{len(watch_list)} more pool(s) are {VERDICT_WATCH} -- safe, but don't currently clear the "
+              f"trade gate (see `scan --with-range` for the full list).")
 
     if args.capital:
         note = position_sizing_note(args.capital, top["tvl"], top["model_net_apy"])

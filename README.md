@@ -153,17 +153,38 @@ anyway (its own volatility is ~0). A missing or malformed config fails
 closed to an empty set (with a warning), not a crash or a silently stale
 fallback.
 
-## No candidate has to mean NO_TRADE
+## Every result is one of four verdicts
 
-Passing the pre-deposit screen (below) answers "is this pool safe and
-plausible to consider" — it doesn't answer "is it actually worth doing."
-`recommend` now gates its "Top pick" behind `passes_trade_gate()`: `model_net_apy`
-must be positive **and** `vol_ratio < 1` (not graded Cheap). Before this,
-`recommend` would print a "Top pick" even when every candidate netted
-negative after IL or graded Cheap — which reads as an endorsement it never
-meant to make. When nothing clears both bars, `recommend` prints an explicit
-`NO_TRADE` verdict with the specific reason(s), and shows the closest
-candidate for reference only, clearly labeled as not a recommendation.
+Every pool this tool ever reports on ends up as exactly one of
+**`ENTER`** / **`WATCH`** / **`NO_TRADE`** / **`UNSCOREABLE`** — a single
+`verdict` field, consistent across `scan`/`range`/`recommend`/
+`rebalance-check`, instead of reconstructing the same judgment call from
+scattered grade/flags/vol_ratio fields each time:
+
+- **`ENTER`** — cleared the trade gate: positive `model_net_apy` **and**
+  `vol_ratio < 1` (not graded Cheap). This is the bar `recommend`'s "Top
+  pick" has to clear.
+- **`WATCH`** — passed the pre-deposit safety screen (a legitimate pool)
+  but doesn't clear the trade gate right now — negative net APY, or graded
+  Cheap. Not a warning, just not attractive *today*; worth watching in
+  case the apy/vol picture shifts, not avoiding.
+- **`NO_TRADE`** — failed the pre-deposit safety/plausibility screen (see
+  below), or (for `recommend` specifically) nothing at all cleared the
+  trade gate. Before this gate existed, `recommend` would print a "Top
+  pick" even when every candidate netted negative after IL or graded
+  Cheap — which reads as an endorsement it never meant to make. When
+  nothing clears the bar, `recommend` prints an explicit `NO_TRADE`
+  verdict with the specific reason(s), shows the closest candidate for
+  reference only (clearly labeled as not a recommendation), and — new —
+  surfaces how many pools are sitting at `WATCH` instead of just going
+  silent on them.
+- **`UNSCOREABLE`** — never evaluated at all (a fetch failed, no confirmed
+  bStock, insufficient kline data). Distinct from `NO_TRADE` on purpose:
+  "we don't know" and "we checked and it's not worth it" are different
+  claims, and collapsing them (which earlier versions did) makes it
+  impossible to tell "this pool is risky" from "we simply have no data on
+  it." `recommend` also refuses to give *any* verdict when too much of
+  the market is `UNSCOREABLE` — see "Reliability" below.
 
 ## rebalance-check: a concrete alternative, not just a grade
 
@@ -335,8 +356,8 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 149 tests total. `test_riskscreen.py`
-(127) covers pure-math/pure-logic functions with no I/O at all.
+test_riskscreen_integration.py` runs 154 tests total. `test_riskscreen.py`
+(132) covers pure-math/pure-logic functions with no I/O at all.
 `test_riskscreen_integration.py` (22) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
@@ -562,11 +583,65 @@ already built.
   from reading as false precision. A full GARCH/EWMA forecasting model is a
   further step past that, with more implementation cost for a less certain
   payoff on kline histories this short.
-- **Automatic corporate-action gating.** The "check for upcoming corporate
-  actions" step is currently a manual reminder in `SKILL.md`; it should be a
-  direct call to `binance-tokenized-securities-info`'s asset-market-status
-  API that widens the effective vol estimate or flags the pool outright when
-  an earnings/dividend/split date falls inside the recommendation horizon.
+- **Automatic corporate-action gating** — the concrete first step of the
+  "hard alerts" idea (corporate actions/depeg/liquidity crashes/incentive
+  expiry). The "check for upcoming corporate actions" step is currently a
+  manual reminder in `SKILL.md`; it should be a direct call to
+  `binance-tokenized-securities-info`'s asset-market-status API that widens
+  the effective vol estimate or flags the pool outright when an
+  earnings/dividend/split date falls inside the recommendation horizon.
+  Depeg/liquidity-crash/incentive-expiry alerts would each need their own
+  signal source and are unscoped past the idea stage.
+- **Decision snapshots.** Record each `recommend`/`scan` verdict (inputs,
+  `verdict`, the numbers behind it) to durable local storage so it can be
+  revisited later against what actually happened — "did this age well."
+  Needs a schema and a persistence layer this stateless CLI script doesn't
+  have yet; worth designing deliberately rather than bolting on quickly,
+  and closely related to the historical-calibration item below (a snapshot
+  store is most of what a paper-trading harness would need to replay
+  against anyway).
+
+### Recently shipped (the ENTER/WATCH/NO_TRADE/UNSCOREABLE verdict system)
+
+The first piece of the review's "product next stage" tier — the one the
+review itself called longer-term — scoped down to what's concretely
+buildable without a new external data source or a persistence layer: a
+consistent `verdict` field built directly on `passes_trade_gate`'s
+existing logic, not a new threshold. See "Every result is one of four
+verdicts" above for the full picture.
+
+- **Every `results`/`flagged`/`unscoreable` row now carries a `verdict`**
+  (`ENTER`/`WATCH`/`NO_TRADE`/`UNSCOREABLE`) — previously only
+  `recommend`'s "Top pick" selection computed `passes_trade_gate()`
+  ad hoc; a `scan --json` consumer had no field to filter/sort on for "is
+  this one actually worth it," only `grade` (vol_ratio alone, blind to
+  whether net APY was even positive).
+- **`recommend` now surfaces its `WATCH` pools** instead of going silent
+  on everything that isn't the Top pick or an explicit `NO_TRADE` — both
+  in the ranked table and as a one-line count in the `NO_TRADE` case, so
+  "nothing to enter right now" and "nothing at all worth looking at" read
+  as the different situations they are.
+- **`scan`'s text tables gained a `verdict` column** (`--with-range` and
+  plain), so a human reading the table gets the same label a `--json`
+  consumer would parse.
+
+Deliberately **not** attempted in this pass, and why: **decision
+snapshots** (record a recommendation, revisit it later) needs a
+persistence layer this stateless CLI script doesn't have yet, and a
+schema decision worth getting right rather than bolting on quickly.
+**Hard alerts** for corporate actions/depeg/liquidity crashes/incentive
+expiry need a new external data source
+(`binance-tokenized-securities-info`'s asset-market-status API, currently
+only a manual reminder in `SKILL.md`) wired into the automated screen, not
+just a one-off check. **Paper-trading/historical-replay** is the review's
+own largest-scoped item — already tracked in Roadmap as "flagged, not
+attempted" before this pass and still true after it. All three are real
+product decisions, not bug fixes, and building them without confirming
+the intended design first risks a lot of wasted effort on something that
+doesn't match what's actually wanted.
+
+5 new tests (154 total, up from 149) plus verdict assertions added to
+several existing integration tests.
 
 ### Recently shipped (testing & engineering gaps, from the same review)
 
@@ -771,7 +846,8 @@ review itself recommended:
   — see "Not every pool is quoted against a stablecoin" above.
 - **`NO_TRADE` as an explicit outcome (P0).** `recommend` no longer prints a
   "Top pick" when nothing clears `passes_trade_gate()` (positive model_net_apy,
-  vol_ratio < 1) — see "No candidate has to mean NO_TRADE" above.
+  vol_ratio < 1) — see "Every result is one of four verdicts" above (later
+  generalized into the full ENTER/WATCH/NO_TRADE/UNSCOREABLE verdict system).
 - **Scenario stress check on `range`'s recommended range** — Neutral/Elevated/
   Stress at 1x/1.5x/2x the estimated σ, so the recommendation's sensitivity
   to the vol estimate is visible, not implicit. (Full historical
