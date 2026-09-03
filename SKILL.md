@@ -240,6 +240,24 @@ range can show a higher `model_net_apy` number but at a `p_active` so low it's
 misleading to call it safe. Always show `p_active` next to any recommended
 range, not just the model_net_apy figure.
 
+**A narrow range's small `expected_il` is not, by itself, a reason to
+prefer it.** Confirmed as a real point of confusion, not hypothetical: a
+user saw a full sweep where the narrowest presets (`±5%`/`±10%`) showed
+the *smallest* `il` figures and asked why the tool didn't recommend one
+of them for higher yield. Verified live (two different pools, two
+different volatilities) that this isn't a bug — `expected_il` for a very
+narrow range is small *because* even the worst case (price touching the
+boundary) is a tiny move for a tight band, but those same rows also show
+near-zero `effective_apy` and `Low` confidence, for the identical reason:
+at real volatility, price exits a band that tight almost immediately, so
+fees barely accrue before it does. A small `il` next to a near-zero
+`eff.apy` is not a good deal, it's a range that will not stay funded long
+enough to earn anything. Never cite `expected_il` alone as a reason a
+range looks attractive — always pair it with `p_active`/`confidence` and
+`effective_apy` from the same row, and trust `recommended` (which already
+nets exactly this trade-off) over eyeballing the `il` column in
+isolation.
+
 ## Visualizing results
 
 Use the Artifact tool or the visualize widget (see the `dataviz` skill for

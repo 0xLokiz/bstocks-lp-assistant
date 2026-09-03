@@ -339,9 +339,9 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` 总共跑164个测试。`test_riskscreen.py`
+test_riskscreen_integration.py` 总共跑165个测试。`test_riskscreen.py`
 （135个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
-`test_riskscreen_integration.py`（29个）端到端地跑
+`test_riskscreen_integration.py`（30个）端到端地跑
 `run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
 mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
 现；中间的每一个 `fetch_*`/`resolve_*`/`evaluate_*` 函数都是真的在跑。
@@ -566,6 +566,26 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（审查了区间选择算法——不是bug，是表格看着容易误读）
+
+用户直接要求彻底重新审查一遍区间推荐规则："如果il是个位数，那说明波
+动率低，这种情况下应该缩窄区间赚更高收益——为什么给出了±90%？"没有预
+设立场，手动追了两个真实池子的完整区间扫描（NVDAB-USDT，σ≈50%；
+GMEB-USDT，σ≈40%）。结果发现选择逻辑本身（在 `p_active ≥ 60%` 的候选
+里选 `model_net_apy` 最高的那个，见 MODEL.md §6.4）是对的：窄区间的
+`il` 之所以小，是因为哪怕最坏情况（价格碰到边界）对一个很窄的区间来
+说也只是很小的一次价格变动——但同样这几行的 `effective_apy` 也接近
+零、`confidence` 也是Low，原因完全一样：在真实的波动率下，价格几乎肯
+定会很快就冲出这么窄的区间，手续费根本来不及攒起来。单看 `il` 本来就
+不该拿来判断，`net_apy` 已经把它和 `p_active` 正确地权衡在一起了；两
+个池子实测下来，`±90%`/`±50%` 确实是真正最优的选择。真正该修的问题是
+这张表让人能光看 `il` 一栏就得出相反的结论，却没有把它跟同一行的
+`confidence`/`eff.apy` 联系起来——`cmd_range` 的跨价表格现在只要有任
+何一行是Low confidence就会打印一条明确的提示，`SKILL.md` 里也加了同
+样的提醒，用于在聊天里展示结果的时候。新增1个测试外加给一个已有测试
+补了一条断言（共165个，此前164个），覆盖了"该出现提示"和"不该出现提
+示"两种情况。
 
 ### 最近完成的（IL这个bug的第二轮：给N/A比给一个封顶的猜测数字更对）
 

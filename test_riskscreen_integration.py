@@ -549,6 +549,37 @@ def test_range_text_output_shows_il_column_and_capital_simulation(fake_io, capsy
     for line in data_lines:
         assert "%" in line  # il/net_apy percentages present
     assert "model estimate, not a promised return" in out
+    # Real point of confusion this locks in: at this fixture's sigma (~43%), the narrowest
+    # preset ranges have Low confidence (near-zero p_active) alongside a small `il` figure --
+    # a user reading `il` alone could mistake that for safety. The clarifying note must appear.
+    assert "not by itself a safety signal" in out
+
+
+def test_range_straddle_omits_narrow_range_caveat_when_nothing_is_low_confidence(fake_io, capsys):
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}], apy_bps=3000)
+    # Flat candles (open == close, no intraday range) -> sigma close to 0 -> every preset width,
+    # even +/-5%, comfortably clears the p_active safety floor. The narrow-range caveat is only
+    # relevant when some row is actually Low confidence -- it must not print unconditionally.
+    returns = [0.0003, -0.0002] * 30
+    rows = []
+    price, t = 100.0, 0
+    for r in returns:
+        o = price
+        c = price * (1 + r)
+        rows.append([t, str(o), str(o), str(o), str(c), "1000", t])
+        price, t = c, t + DAY_MS
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = rows
+
+    args = cli.build_parser().parse_args(["range", "--investmentId", "inv1"])
+    cli.cmd_range(args)
+
+    out = capsys.readouterr().out
+    assert "not by itself a safety signal" not in out
 
 
 # ---- recommend: NO_TRADE, refuse-threshold, position-fetch-failure ----

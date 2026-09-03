@@ -293,6 +293,17 @@ def cmd_range(args):
               "High/Moderate/Low; il = expected impermanent loss for this range (already subtracted "
               "out of eff.apy to get net_apy); recommended = best net_apy at Moderate-or-better "
               "confidence. Full numbers: --json on scan.)")
+        narrow_low_conf = [r for r in rows if r["pa"] is not None
+                           and r["p_active"] < range_model.SAFETY_P_ACTIVE_FLOOR]
+        if narrow_low_conf:
+            print("(A narrow range's low `il` here is not by itself a safety signal -- it's low "
+                  "because even the worst case (price touching the boundary) is a small move for "
+                  "a tight band. Those same rows show low `confidence`/`eff.apy` for the identical "
+                  "reason: at this volatility, price almost certainly exits a band that tight "
+                  "almost immediately, so fees barely accrue before it does -- a narrower range "
+                  "isn't automatically higher-yield just because its `il` looks small. Read `il` "
+                  "together with `confidence`/`eff.apy` in the same row, never alone; `recommended` "
+                  "already picks the width that nets these out correctly.)")
         if any(r["model_net_apy"] is None for r in rows):
             print("(N/A = this range's expected IL couldn't be estimated -- volatility this high "
                   "(> ~283% annualized) is outside where the diffusion approximation this model "

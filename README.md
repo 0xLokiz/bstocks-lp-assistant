@@ -396,9 +396,9 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 164 tests total. `test_riskscreen.py`
+test_riskscreen_integration.py` runs 165 tests total. `test_riskscreen.py`
 (135) covers pure-math/pure-logic functions with no I/O at all.
-`test_riskscreen_integration.py` (29) exercises `run_scan`/`cmd_*` end to
+`test_riskscreen_integration.py` (30) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
 `_get()`, with fake dispatchers keyed by call signature; every
@@ -672,6 +672,30 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (audited the range-selection algorithm -- not a bug, a confusing table)
+
+Asked directly to fully re-audit the range-recommendation rules: "if `il`
+is single digits, that means volatility is low, so you should narrow the
+range for more yield -- why did you recommend ±90%?" Traced two real
+pools' full range sweeps by hand (NVDAB-USDT sigma≈50%, GMEB-USDT
+sigma≈40%) rather than assuming either side of the question. The
+selection logic (`max(model_net_apy)` among candidates with `p_active >=
+60%`, MODEL.md §6.4) turned out to already be correct: a narrow range's
+small `il` is small *because* even the worst case (touching the boundary)
+is a tiny move for a tight band -- but those identical rows show
+near-zero `effective_apy` and Low confidence for the same underlying
+reason (at real volatility, price exits a band that tight almost
+immediately, so fees barely accrue first). `il` alone was never the right
+number to read in isolation; `net_apy` already correctly weighs it
+against `p_active`, and `±90%`/`±50%` were the genuinely optimal picks in
+both pools traced. The real, fixable problem was that the table let a
+reader draw the opposite conclusion from `il` alone without connecting it
+to `confidence`/`eff.apy` in the same row -- `cmd_range`'s straddle table
+now prints an explicit caveat whenever any row is Low confidence, and
+`SKILL.md` carries the same warning for how results get presented in
+chat. 1 new test plus a new assertion on an existing one (165 total, up
+from 164) covering both the caveat-present and caveat-absent cases.
 
 ### Recently shipped (round two on the IL bug: N/A beats a capped guess)
 
