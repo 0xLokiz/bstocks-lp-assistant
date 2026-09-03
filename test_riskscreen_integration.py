@@ -253,15 +253,24 @@ def test_run_scan_investment_info_fetch_failure_reported_not_dropped(fake_io):
 
 
 def test_run_scan_peer_outlier_apy_flagged(fake_io):
+    # Three normal-apy peers, not one: a median needs min_peer_sample_size (default 3) same-
+    # ticker pools before it's a reliable benchmark -- see risk_screen.MIN_PEER_SAMPLE_SIZE and
+    # the GMEB-USDT case in its docstring (a single noisy peer produced a false "6x the median").
     fb, fg = fake_io
     fg.stock_tokens = [nvda_token()]
     normal = pool_entry("inv_normal", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", apy_bps=3000)
+    normal2 = pool_entry("inv_normal2", "NVDAB-USDT", "PancakeSwap V2", "pancakeswap2", apy_bps=3200)
+    normal3 = pool_entry("inv_normal3", "NVDAB-USDT", "Biswap", "biswap", apy_bps=2800)
     outlier = pool_entry("inv_outlier", "NVDAB-USDT", "Uniswap V3", "uniswap3", apy_bps=100000)
-    fb.investment_list_page1 = [normal, outlier]
+    fb.investment_list_page1 = [normal, normal2, normal3, outlier]
     asset_list = [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
                   {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}]
     fb.investment_info["inv_normal"] = info_entry("NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
                                                    asset_list, apy_bps=3000)
+    fb.investment_info["inv_normal2"] = info_entry("NVDAB-USDT", "PancakeSwap V2", "pancakeswap2",
+                                                     asset_list, apy_bps=3200)
+    fb.investment_info["inv_normal3"] = info_entry("NVDAB-USDT", "Biswap", "biswap",
+                                                     asset_list, apy_bps=2800)
     fb.investment_info["inv_outlier"] = info_entry("NVDAB-USDT", "Uniswap V3", "uniswap3",
                                                     asset_list, apy_bps=100000)
     fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
@@ -272,6 +281,35 @@ def test_run_scan_peer_outlier_apy_flagged(fake_io):
     result_ids = {r["investmentId"] for r in results}
     assert "inv_outlier" in flagged_ids
     assert "inv_normal" in result_ids
+
+
+def test_run_scan_peer_outlier_not_flagged_with_only_one_peer(fake_io):
+    # The exact GMEB-USDT scenario: an apy that looks like a huge multiple of its only peer's
+    # apy must NOT be excluded by the peer-outlier signal alone when there aren't enough peers
+    # for "median" to mean anything -- other independent signals (feeRate, TVL, V4 hook) still
+    # apply normally and are what should catch a genuinely bad pool.
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    peer = pool_entry("inv_peer", "NVDAB-USDT", "Uniswap V4", "uniswap4", apy_bps=8500)
+    candidate = pool_entry("inv_candidate", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", apy_bps=51000)
+    fb.investment_list_page1 = [peer, candidate]
+    asset_list = [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+                  {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}]
+    fb.investment_info["inv_peer"] = info_entry("NVDAB-USDT", "Uniswap V4", "uniswap4",
+                                                 asset_list, apy_bps=8500)
+    fb.investment_info["inv_candidate"] = info_entry("NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+                                                      asset_list, apy_bps=51000)
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+
+    results, flagged, unscoreable, coverage = scan.run_scan(max_pages=1)
+
+    flagged_ids = {f["investmentId"] for f in flagged}
+    result_ids = {r["investmentId"] for r in results}
+    # inv_peer is V4-generation and still hard-blocked on that independent signal
+    assert "inv_peer" in flagged_ids
+    # but inv_candidate is PancakeSwap V3 with a sane feeRate/TVL and only one peer to compare
+    # against -- the peer-outlier signal alone must not exclude it
+    assert "inv_candidate" in result_ids
 
 
 def test_run_scan_coverage_reports_truncation_when_max_pages_cuts_scan_short(fake_io):

@@ -10,6 +10,8 @@ from bstocks_lp import il_model
 MAX_SANE_FEE_RATE = 0.05      # 5% per swap -- generous; real fee tiers top out around 1%
 MIN_SANE_TVL_USD = 5_000       # below this, a single trade can dominate the annualized apy
 PEER_APY_OUTLIER_MULTIPLE = 5  # flag if > 5x the median apy of other pools on the same ticker
+MIN_PEER_SAMPLE_SIZE = 3       # need at least this many *other* pools on the same ticker before
+                                # "median" means anything -- see pool_risk_flags docstring
 MIN_PROTOCOL_SECURITY_SCORE = 50  # `defi protocol-info` securityScore floor (0-100)
 
 _PROTOCOL_ID_VERSION_RE = re.compile(r"(\d+)$")
@@ -37,6 +39,7 @@ def _protocol_carries_unaudited_hook_risk(protocol_id, protocol_name):
 def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
                      max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
                      peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
+                     min_peer_sample_size=MIN_PEER_SAMPLE_SIZE,
                      min_security_score=MIN_PROTOCOL_SECURITY_SCORE,
                      block_unknown_v4_hooks=True):
     """Aggregate pre-deposit sanity/safety screen for one LP pool -- generalizes the original
@@ -69,7 +72,17 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
         an implausible apy, not just the one specific cause already identified once. `peer_apys`
         must already exclude this pool's own apy (by identity, e.g. investmentId) -- it is used
         as-is, not filtered by value, so two distinct pools that happen to share an apy don't
-        wrongly exclude each other.
+        wrongly exclude each other. Only fires when at least `min_peer_sample_size` peers exist
+        (default 3): `statistics.median` of a 1-element list is just that element, so with a
+        single peer "N times the median" is really just "N times one other pool's apy" -- you
+        can't tell which of the two is actually the odd one out, and that peer can itself be
+        noisy. Confirmed live, not hypothetical: a GMEB-USDT (PancakeSwap V3) pool was flagged
+        as "6.0x the median (84.7%)" against its only peer (the Uniswap V4 GMEB-USDT pool) --
+        that peer's own apy had moved to 123.20% by the time it was checked directly minutes
+        later, and the flagged pool's feeRate (0.25%, a standard PancakeSwap tier), TVL
+        ($245K), and lack of any reward-token incentive showed no actual defect. A real
+        multi-pool outlier (the QQQB-USDC case this check was built for) stays caught either
+        way, since it also has enough same-ticker peers and an independently broken feeRate.
 
     Deposit-risk signals (money going in may not be safe):
       - `investable=false` -- delisted, no new deposits possible.
@@ -124,7 +137,7 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
                       f"liquidity is statistically noisy, easily swung by a single trade")
 
     apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
-    if peer_apys:
+    if peer_apys and len(peer_apys) >= min_peer_sample_size:
         median = statistics.median(peer_apys)
         if median > 0 and apy > median * peer_outlier_multiple:
             flags.append(f"apy is {apy/median:.1f}x the median ({median*100:.1f}%) of other pools "
@@ -148,6 +161,7 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
 def evaluate_pool(pool, info, sigma, apy, peer_apys=None, protocol_security_score=None,
                    max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
                    peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
+                   min_peer_sample_size=MIN_PEER_SAMPLE_SIZE,
                    min_security_score=MIN_PROTOCOL_SECURITY_SCORE, block_unknown_v4_hooks=True):
     """The one evaluation path for a pool with an already-resolved sigma/apy -- used by both
     `run_scan` and `rebalance-check`'s market comparison, so the two can never reach
@@ -162,6 +176,7 @@ def evaluate_pool(pool, info, sigma, apy, peer_apys=None, protocol_security_scor
     flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=protocol_security_score,
                              max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl_usd,
                              peer_outlier_multiple=peer_outlier_multiple,
+                             min_peer_sample_size=min_peer_sample_size,
                              min_security_score=min_security_score,
                              block_unknown_v4_hooks=block_unknown_v4_hooks)
     return {"flags": flags, "scored": il_model.risk_adjusted_apy(apy, sigma)}

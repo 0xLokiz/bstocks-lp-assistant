@@ -243,10 +243,26 @@ is excluded from ranking, with the reason reported, not silently dropped.
 |---|---|---|
 | `feeRate` > 5%/swap | real yield? | a dynamic/keeper-priced fee read that a static-rate annualization can't handle |
 | TVL < $5,000 | real yield? | statistically noisy apy from too little liquidity |
-| apy > 5x peer median, same ticker | real yield? | **the general case** — any mechanism, known or not |
+| apy > 5x peer median, ≥3 same-ticker peers | real yield? | **the general case** — any mechanism, known or not |
 | `investable = false` | safe? | delisted, no new deposits possible |
 | protocol `securityScore` < 50 | safe? | obviously disreputable protocols (weak floor, see below) |
 | protocol is V4-generation (`defiProtocolId`) | safe? | **hard-blocked by default** — see "V4 pools are hard-blocked" below |
+
+**The peer-median check needs enough peers to mean anything.** `statistics.median`
+of a 1-element list is just that element, so with a single same-ticker peer
+"N times the median" is really just "N times one other pool's apy" — you
+can't tell which of the two is actually the odd one out, and that lone peer
+can itself be noisy. Confirmed live, not hypothetical: a GMEB-USDT
+(PancakeSwap V3) pool was flagged as "6.0x the median" against its only
+peer (a Uniswap V4 GMEB-USDT pool) — checked directly minutes later, that
+peer's own apy had moved from 84.7% to 123.20% within the same session,
+while the flagged pool's `feeRate` (0.25%, a standard PancakeSwap tier),
+TVL ($245K), and lack of any reward-token incentive showed no actual
+defect. The check now only applies once at least
+`MIN_PEER_SAMPLE_SIZE = 3` other pools exist on the same ticker
+(`--min-peer-sample` on `scan`) — a real multi-pool outlier (the QQQB-USDC
+case this check was built for) stays caught either way, since it also has
+enough same-ticker peers and an independently broken `feeRate`.
 
 **Distinct from `flagged`: `unscoreable`.** Some pools are never evaluated
 at all — an `investment-info` fetch failed, `assetTokenList` didn't confirm
@@ -395,7 +411,7 @@ python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- recommendation (needs a signed-in `baw` session) ---
 python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4 "REASON"]
-  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
+  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5] [--min-peer-sample 3]
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "REASON"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # or without a live pool
@@ -701,6 +717,31 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (peer-outlier check needs enough peers, or it flags a clean pool)
+
+Found and fixed live, from a user pushing back on a flagged pool: "why do
+you just drop it because the apy looks abnormal, you should check if it's
+actually real." Investigated a specific flagged pool (GMEB-USDT,
+PancakeSwap V3, apy 509.44%, flagged as "6.0x the median (84.7%)") by
+pulling its raw `investment-info` directly -- `feeRate=0.25%` (a standard
+PancakeSwap tier, nothing like the QQQB case's invalid 838.86%/swap
+reading), TVL $245K (healthy), no reward-token incentive layered on top,
+not a V4 pool. None of the signals that would explain a *fake* number were
+present. The actual defect: this pool's only same-ticker peer (the
+Uniswap V4 GMEB-USDT pool) had exactly one other entry, and
+`statistics.median` of a 1-element list is just that element -- rechecked
+minutes later, that lone peer's own apy had moved from 84.7% to 123.20%,
+meaning the "median" the flag leaned on was itself noise, not a stable
+benchmark. Fixed by adding `MIN_PEER_SAMPLE_SIZE = 3` (`--min-peer-sample`
+on `scan`): the peer-outlier check now only applies once at least that
+many other same-ticker pools exist. Verified live this doesn't weaken
+real detection -- QQQB-BNB (which has 3+ QQQ-ticker peers) is still
+correctly flagged, while GMEB-USDT, and two other previously-flagged
+pools (HOODB-BNB, SNDKB-USDT) that also only had one same-ticker peer,
+now correctly drop the peer-outlier flag specifically (HOODB-BNB stays
+excluded regardless, on its independent low-TVL flag). New test coverage
+for both the unit-level guard and the end-to-end `run_scan` behavior.
 
 ### Recently shipped (read Fables' docs end to end, cited what it corroborates)
 

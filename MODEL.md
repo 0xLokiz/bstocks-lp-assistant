@@ -152,7 +152,7 @@ Independently of the yield model above, every candidate pool passes through `poo
 **Data-plausibility** (is the advertised `apy` even real):
 - `feeRate` per swap exceeding `MAX_SANE_FEE_RATE = 5%` — catches a dynamic/keeper-priced fee snapshot being misread as a static annualizable rate (observed live: a momentary `feeRate=838.86%/swap` on a V4 pool produced `apy=1658.77%`).
 - Pool TVL below `MIN_SANE_TVL_USD = 5,000 USD` — below this, a single trade can dominate the annualized `apy` estimate.
-- `apy` more than `PEER_APY_OUTLIER_MULTIPLE = 5x` the median `apy` of other pools on the same underlying ticker.
+- `apy` more than `PEER_APY_OUTLIER_MULTIPLE = 5x` the median `apy` of other pools on the same underlying ticker — only applied once at least `MIN_PEER_SAMPLE_SIZE = 3` other pools exist on that ticker. A median from fewer peers isn't a reliable benchmark: confirmed live, a GMEB-USDT pool was flagged as "6.0x the median" against a single peer whose own `apy` had moved from 84.7% to 123.20% within the same session, while the flagged pool's `feeRate` (0.25%, a standard fee tier), TVL ($245K), and lack of any reward-token incentive showed no actual defect.
 
 **Deposit-risk** (is putting money in actually safe):
 - `investable = false` (delisted).

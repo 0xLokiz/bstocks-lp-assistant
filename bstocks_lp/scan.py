@@ -114,6 +114,7 @@ UNSCOREABLE_RATIO_REFUSE_THRESHOLD = 0.5  # refuse a verdict when more than half
 
 def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=risk_screen.MIN_SANE_TVL_USD,
              peer_outlier_multiple=risk_screen.PEER_APY_OUTLIER_MULTIPLE,
+             min_peer_sample_size=risk_screen.MIN_PEER_SAMPLE_SIZE,
              min_security_score=risk_screen.MIN_PROTOCOL_SECURITY_SCORE,
              block_unknown_v4_hooks=True, with_range=False, log=lambda msg: print(msg, file=sys.stderr)):
     """Core of `scan`, factored out so `recommend` and `rebalance_check`'s market-comparison
@@ -308,6 +309,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
             pool, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
             max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
             peer_outlier_multiple=peer_outlier_multiple,
+            min_peer_sample_size=min_peer_sample_size,
             min_security_score=min_security_score,
             block_unknown_v4_hooks=block_unknown_v4_hooks)
         if evaluation["flags"]:

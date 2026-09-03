@@ -359,8 +359,22 @@ def test_pool_risk_flags_catches_low_protocol_security_score():
 def test_pool_risk_flags_catches_peer_outlier():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "1.0"}  # 100% apy
-    peers = [0.10, 0.12]  # peer median 11%, this pool is ~9x that
+    peers = [0.10, 0.12, 0.11]  # peer median 11%, this pool is ~9x that
     flags = pool_risk_flags(pool, info, peer_apys=peers)
+    assert any("outlier" in f for f in flags)
+
+
+def test_pool_risk_flags_skips_peer_outlier_below_min_sample_size():
+    # a "median" from one or two peers isn't a reliable benchmark -- confirmed live: a
+    # GMEB-USDT pool was flagged as "6.0x the median" against its single peer, and that
+    # peer's own apy had moved 84.7% -> 123.20% within the same session, while the flagged
+    # pool's feeRate/TVL/incentive data showed no actual defect (see risk_screen.py).
+    pool = {"tvl": "50000"}
+    info = {"tvl": "50000", "apy": "1.0"}
+    assert pool_risk_flags(pool, info, peer_apys=[0.10]) == []
+    assert pool_risk_flags(pool, info, peer_apys=[0.10, 0.12]) == []
+    # but three-or-more peers is enough for the check to apply again
+    flags = pool_risk_flags(pool, info, peer_apys=[0.10, 0.12, 0.11])
     assert any("outlier" in f for f in flags)
 
 

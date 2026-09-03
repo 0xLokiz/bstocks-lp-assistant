@@ -205,10 +205,27 @@ V3/V4 池子可能报出极不靠谱的 `apy` 数字，而且没有哪一个单�
 |---|---|---|
 | `feeRate` > 5%/笔 | 收益是真的吗？ | 动态/keeper定价的费率快照，静态年化公式处理不了 |
 | TVL < $5,000 | 收益是真的吗？ | 流动性太少导致apy统计上很吵，容易被单笔交易左右 |
-| apy 超过同ticker中位数的5倍 | 收益是真的吗？ | **通用情形**——不管是什么机制造成的，已知的还是未知的 |
+| apy 超过同ticker中位数的5倍，且至少有3个同ticker peer | 收益是真的吗？ | **通用情形**——不管是什么机制造成的，已知的还是未知的 |
 | `investable = false` | 安全吗？ | 已下架，无法新存款 |
 | 协议 `securityScore` < 50 | 安全吗？ | 明显不靠谱的协议（较弱的下限，见下文） |
 | 协议是V4系列（`defiProtocolId`） | 安全吗？ | **默认硬性拦截**——见下方"Uniswap V4 池子默认硬拦截" |
+
+**中位数检查需要足够多的对照样本才有意义。** `statistics.median` 算一个
+只有1个元素的列表，结果就是那一个元素本身——所以只有1个同ticker peer时，
+"是中位数的N倍"其实就是"是另一个池子apy的N倍"，你根本分不清这两个池子里
+到底谁才是真正的异常值，而且那唯一的peer本身也可能很吵。这是实测出来的，
+不是假设：一个 GMEB-USDT（PancakeSwap V3）池子被标记为"是中位数(84.7%)
+的6.0倍"，参照的就是它唯一的peer（一个 Uniswap V4 版本的 GMEB-USDT 池
+子）——几分钟后直接核实，这个peer自己的apy已经从84.7%变成了123.20%，
+说明这个flag依赖的"中位数"本身就是噪声，不是稳定的基准；而被标记的这个
+池子的 `feeRate`（0.25%，标准PancakeSwap费率档位）、TVL（$245K）、也没
+有挂任何激励代币——一个能说明数据真的有问题的破绽都没查到。修复方式是加
+了 `MIN_PEER_SAMPLE_SIZE = 3`（`scan` 上对应 `--min-peer-sample`）：只有
+同ticker至少存在这么多个其他池子时，这个检查才生效。实测确认这个改动没
+有削弱真正的异常检测——QQQB-BNB（QQQ这个ticker下有3个以上的peer）依然
+被正确标记，而 GMEB-USDT，以及另外两个之前也是只有1个同ticker peer的池
+子（HOODB-BNB、SNDKB-USDT），现在都正确地不再被这条peer-outlier规则单
+独排除（HOODB-BNB本身因为TVL太低这条独立信号，还是会被排除）。
 
 **和 `flagged` 是两回事：`unscoreable`。** 有些池子根本没被评估过——
 `investment-info` 抓取失败、`assetTokenList` 确认不了是bStock、或者没有
@@ -336,7 +353,7 @@ python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- 排名/建议（需要已登录的 `baw` 会话）---
 python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4 "理由"]
-  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
+  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5] [--min-peer-sample 3]
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "理由"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # 不查真实池子也行
@@ -589,6 +606,26 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（同ticker异常值检查得有足够多的对照样本，不然会误伤干净的池子）
+
+在实际使用中被用户当场指出的问题："为什么apy看着异常你就直接拦掉，你应该
+去判断是不是真的。"具体核查了一个被标记的池子（GMEB-USDT，PancakeSwap
+V3，apy 509.44%，被标记为"是中位数(84.7%)的6.0倍"）——直接拉了它的原始
+`investment-info`：`feeRate=0.25%`（标准的PancakeSwap费率档位，跟QQQB那
+次真的无效的838.86%/笔完全不是一回事），TVL $245K（健康），没有挂任何激
+励代币，也不是V4池子。能说明数据是假的那几个破绽，一个都没查到。真正的问
+题在于：这个池子唯一的同ticker peer（一个 Uniswap V4 版本的 GMEB-USDT）
+只有1个，而 `statistics.median` 算一个只有1个元素的列表，结果就是那个元
+素本身——几分钟后再核实，这唯一的peer自己的apy已经从84.7%变成了123.20%，
+说明这个flag依赖的"中位数"本身就是噪声，不是稳定基准。修复方式是加了
+`MIN_PEER_SAMPLE_SIZE = 3`（`scan` 上对应 `--min-peer-sample`）：只有同
+ticker至少存在这么多个其他池子时，这条检查才生效。实测确认没有削弱真正的
+异常检测能力——QQQB-BNB（QQQ这个ticker下有3个以上peer）依然被正确标记，
+而 GMEB-USDT，以及另外两个原本也是只有1个同ticker peer的池子（HOODB-BNB、
+SNDKB-USDT），现在都正确地不再被这条peer-outlier规则单独排除（HOODB-BNB
+本身因为TVL太低这条独立信号，还是照常被排除）。新增了单元测试和端到端
+`run_scan` 层面的测试覆盖。
 
 ### 最近完成的（完整读了一遍Fables的文档，把它能佐证的地方引用进来）
 

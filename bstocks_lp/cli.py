@@ -111,7 +111,8 @@ def cmd_scan(args):
     try:
         results, flagged, unscoreable, coverage = scan.run_scan(
             max_pages=args.max_pages, max_fee_rate=args.max_fee_rate, min_tvl=args.min_tvl,
-            peer_outlier_multiple=args.peer_outlier_multiple, min_security_score=args.min_security_score,
+            peer_outlier_multiple=args.peer_outlier_multiple, min_peer_sample_size=args.min_peer_sample,
+            min_security_score=args.min_security_score,
             block_unknown_v4_hooks=not args.allow_v4, with_range=args.with_range, log=log,
         )
     except Exception as e:
@@ -821,6 +822,10 @@ def build_parser():
                          help=f"pre-deposit screen: minimum pool TVL in USD (default {risk_screen.MIN_SANE_TVL_USD:.0f})")
     p_scan.add_argument("--peer-outlier-multiple", type=_nonneg_float, default=risk_screen.PEER_APY_OUTLIER_MULTIPLE,
                          help=f"pre-deposit screen: flag apy above this multiple of peer median (default {risk_screen.PEER_APY_OUTLIER_MULTIPLE})")
+    p_scan.add_argument("--min-peer-sample", type=_positive_int, default=risk_screen.MIN_PEER_SAMPLE_SIZE,
+                         help=f"pre-deposit screen: minimum number of other same-ticker pools before the "
+                              f"peer-outlier check applies -- a median from fewer peers than this isn't a "
+                              f"reliable benchmark (default {risk_screen.MIN_PEER_SAMPLE_SIZE})")
     p_scan.add_argument("--min-security-score", type=_nonneg_float, default=risk_screen.MIN_PROTOCOL_SECURITY_SCORE,
                          help=f"pre-deposit screen: minimum protocol securityScore, 0-100 (default {risk_screen.MIN_PROTOCOL_SECURITY_SCORE})")
     p_scan.add_argument("--allow-v4", type=_v4_override_reason, default=None, metavar="REASON",
