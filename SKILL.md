@@ -284,6 +284,19 @@ points that direct labels would overlap into noise, label at minimum the
 `ENTER`-verdict / best few points directly and say so in the surrounding
 text ("top 5 labeled directly; hover for the rest").
 
+**Keep bubbles small enough to read, especially in a dense cluster.** A
+second real problem observed in practice, on the same chart as above:
+bubbles sized up to ~24px radius overlapped heavily in the crowded
+low-`vol_ratio`/high-`apy` corner (where the pools that matter most
+cluster) and swallowed their own labels. Cap bubble radius at roughly
+5–14px (not 6–24) — `tvl` differences still read fine at that range since
+size is a secondary signal here, color/position carry the primary "which
+pool is good" signal — and keep bubble fill semi-transparent (~80%
+opacity) so overlapping bubbles in a cluster don't fully occlude each
+other. If more than ~15 points would be visible at once, consider showing
+fewer (e.g. cap at the top 15–20 by yield) rather than shrinking bubbles
+past legibility to fit them all.
+
 **Every chart and every block of text needs enough explanation to stand on
 its own.** Don't assume the reader already knows what `vol_ratio`,
 `p_active`, `grade`, or `ENTER`/`WATCH`/`NO_TRADE`/`UNSCOREABLE` mean —
@@ -301,27 +314,39 @@ figures) — the chart supplements it, it doesn't replace it.
 
 A single pool's range breakdown, shown alone, hides two things a user
 actually needs to judge it against: how it compares to the rest of the
-market, and what the tradeoffs look like at different range widths with
-their own money. Whenever you present "the best pool" or answer an
-open-ended "what should I do" question, include all of this, not just the
-top pick's headline number:
+market, and what the tradeoffs look like at different range widths.
+Whenever you present "the best pool" or answer an open-ended "what should
+I do" question, include all of this, not just the top pick's headline
+number:
 
 1. **The market-wide picture** — the `scan` bubble chart above, across
    enough pools to show where the top pick sits relative to its
    alternatives (not just in isolation).
-2. **A focused comparison of the top 2-3 pools** — run
-   `range --investmentId <id> [--capital <amount>]` for each of them (not
-   just the single best one) and show, per pool, the range/IL/net-APY
-   breakdown across candidate widths — `range`'s table already has an
-   explicit `il` column (impermanent loss, separate from net APY, not
-   something the user has to subtract themselves) and, when a capital
-   amount is known or reasonably assumed, a `$/yr` column simulating the
-   actual dollar return at each width. If the user hasn't given a capital
-   amount, pick one reasonable illustrative figure (say so: "assuming a
-   $10k deposit, as an example") rather than skipping the simulation
-   entirely or silently picking a number without flagging it as an
-   example.
-3. **One line tying it together** — why the top pick beats the runners-up
+2. **The top 10 pools, each with its own recommended-range summary** —
+   get this from **one** `scan --top 10 --with-range --json` call, not ten
+   separate `range --investmentId` calls per pool (that would reintroduce
+   the exact slow-invocation problem already fixed once — `range` shells
+   out to `baw` per pool, so ten sequential calls cost ten times the
+   latency for data `scan --with-range` already computes in one pass).
+   Each result's `best_range` carries `pa`/`pb` (range width),
+   `confidence`, `expected_il`, and `model_net_apy` — enough for a
+   compact one-row-per-pool table (pool, recommended width, confidence,
+   IL, net APY) covering all 10, not just 2–3. Reserve the full
+   multi-width `range --investmentId` sweep (every candidate width, not
+   just the recommended one) for the single top pick, or for whichever
+   pool the user asks about specifically — that depth is genuinely useful
+   for one pool at a time, not for ten at once.
+3. **Never invent a capital/deposit amount.** `--capital` (on
+   `scan`/`range`/`recommend`) turns percentages into a `$/yr` figure, but
+   only when the *user* has actually stated a deposit size — confirmed in
+   practice that assuming one (even labeled "as an example") reads as
+   presuming something about the user's money they never said. Default to
+   percentage-only figures (net APY, IL — both already scale-invariant,
+   no assumption needed) until the user gives an amount; then pass it
+   through as `--capital` and show the `$/yr` figures it produces. If
+   position sizing genuinely matters to the question being asked, ask for
+   the amount rather than guessing one.
+4. **One line tying it together** — why the top pick beats the runners-up
    (better risk-adjusted yield, safer at similar yield, or a real gap in
    TVL/capacity), not just a repeat of the numbers already shown.
 

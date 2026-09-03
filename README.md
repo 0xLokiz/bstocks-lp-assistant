@@ -606,6 +606,28 @@ already built.
   store is most of what a paper-trading harness would need to replay
   against anyway).
 
+### Recently shipped (a fourth round from real usage)
+
+- **`SKILL.md` no longer tells the agent to invent a capital amount.**
+  The previous guidance said to "pick one reasonable illustrative figure"
+  when the user hadn't given a deposit size — a real user pushed back:
+  even labeled as an example, an invented dollar figure reads as
+  presuming something about their money they never said. Now: percentage
+  figures (net APY, IL) by default, `$/yr` only once the user actually
+  states an amount.
+- **The default "top pools" depth changed from 2-3 to 10** — but sourced
+  the efficient way: one `scan --top 10 --with-range --json` call (whose
+  `best_range` per result already carries the recommended width,
+  confidence, IL, and net APY) rather than ten separate
+  `range --investmentId` calls, which would have quietly reintroduced the
+  exact slow-invocation problem fixed two rounds ago. The full
+  every-candidate-width `range` sweep is now explicitly scoped to one
+  pool at a time (the top pick, or whichever pool the user asks about),
+  not fanned out across ten.
+- **Chart bubble sizing guidance tightened** (max radius ~24px → ~14px)
+  after real dense clusters overlapped badly enough to swallow their own
+  labels — confirmed by rendering the corrected version.
+
 ### Recently shipped (three more findings from real usage)
 
 - **`range`'s text table now shows an explicit `il` column.** Impermanent
