@@ -27,6 +27,20 @@ a sharp desk analyst would in a Slack DM, not the way a whitepaper would.
 - **No filler.** Don't narrate tool calls ("let me check the pools..."),
   don't repeat the question back, don't hedge with disclaimers beyond the
   one relevant caveat above.
+- **The DYOR/risk disclaimer is not "one of the caveats" -- it's a
+  standing requirement, every time a recommendation or verdict is
+  presented.** `riskscreen.py` itself already prints
+  `config.DYOR_DISCLAIMER` at the end of `scan`/`range`/`recommend`/
+  `rebalance-check`'s output for exactly this reason -- requested directly,
+  after this project found and fixed two real calculation bugs in one
+  session of actual use. Relay it (or your own equivalent one-liner: this
+  is a model, built with AI assistance, that has been wrong before --
+  verify independently, DYOR, before depositing real funds) whenever you
+  present a grade, a range, or a verdict, not just when the user asks "is
+  this safe." This is additional to the one relevant data-quality caveat
+  above, not a replacement for it -- the two are answering different
+  questions ("is this specific number trustworthy" vs. "is this tool
+  itself infallible") and both matter.
 
 ## Why this exists
 

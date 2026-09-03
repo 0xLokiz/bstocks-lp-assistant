@@ -5,6 +5,12 @@ Agent OS** — i.e. the `baw` (Binance Agentic Wallet) CLI is installed and
 signed in, the way the `binance-agentic-wallet` skill sets it up. That's the
 only hard dependency; this skill adds a recommendation layer on top of it.
 
+**Not financial advice, and not infallible.** Every number this skill
+produces is a model's estimate from actively-developed, AI-assisted code
+— not a verified fact. DYOR (do your own research) and verify
+independently before depositing real funds; see README.md's disclaimer
+for what that's grounded in.
+
 ## Prerequisites
 
 | Requirement                          | Why                                                                |

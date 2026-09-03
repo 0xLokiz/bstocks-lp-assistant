@@ -2,6 +2,16 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
+> **Not financial advice. DYOR.** This tool's numbers come from an
+> automated model, not a human review, and the code itself is built and
+> maintained with AI assistance -- it can be wrong. Two real calculation
+> bugs were found and fixed in a single session of actual use (see
+> "Recently shipped" below); both produced a specific, confident-looking
+> number that was incorrect before they were caught. Every command's
+> output ends with this same reminder. Treat every figure here as a
+> model's estimate to verify independently, never as a fact to act on
+> directly -- especially before depositing real funds.
+
 A volatility-aware LP advisor for Binance Web3 **bStocks** pools — built
 entirely on the **Binance MCP / Agent OS framework**: Binance's Web3
 market-data APIs plus the Agentic Wallet (`baw`) MCP/CLI surface, no other
@@ -672,6 +682,26 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (a standing DYOR/risk disclaimer, not just a caveat)
+
+Requested directly, immediately after this same session found and fixed
+two real calculation bugs: every command that produces a risk/yield
+judgment needs to remind the user, every time, that this tool's output is
+a model's estimate from AI-assisted, actively-developed code -- not a
+verified fact -- and that's true independent of any specific caveat about
+one number. Added `config.DYOR_DISCLAIMER`, printed at the end of
+`scan`/`range`/`recommend`/`rebalance-check`'s text output and carried as
+a `dyor_disclaimer` field in every `--json` payload that has one
+(`cmd_range` didn't print any caveat at all before this -- a real,
+separate gap this also closed). `SKILL.md` now says explicitly that this
+disclaimer is a standing requirement whenever a grade/range/verdict is
+presented, not one more caveat competing to be "the one caveat" under the
+existing "one caveat, not the list" rule -- the two answer different
+questions and both matter. Both READMEs and INSTALL.md now open with the
+same disclaimer, naming the two bugs as concrete evidence, not an abstract
+warning. New test coverage across all four commands confirming the
+disclaimer is actually present in their real output.
 
 ### Recently shipped (audited the range-selection algorithm -- not a bug, a confusing table)
 

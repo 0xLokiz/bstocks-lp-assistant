@@ -141,6 +141,7 @@ def cmd_scan(args):
             capital_note=capital_note,
             coverage=coverage,
             model_apy_caveat=il_model.MODEL_APY_CAVEAT,
+            dyor_disclaimer=config.DYOR_DISCLAIMER,
             v4_override_reason=args.allow_v4,
         ), indent=2))
         return
@@ -202,6 +203,7 @@ def cmd_scan(args):
             print(f"  {u['pool']}: {u['reason']}")
 
     print(f"\n{il_model.MODEL_APY_CAVEAT}")
+    print(f"\n{config.DYOR_DISCLAIMER}")
 
 
 def cmd_range(args):
@@ -344,6 +346,9 @@ def cmd_range(args):
             if note["warning"]:
                 print(f"WARNING: {note['warning']}")
 
+    print(f"\n{il_model.MODEL_APY_CAVEAT}")
+    print(f"\n{config.DYOR_DISCLAIMER}")
+
 
 def cmd_recommend(args):
     """Single entry point: one verdict instead of deciding which of scan/range/positions to
@@ -399,6 +404,7 @@ def cmd_recommend(args):
             print(f"\n{len(watch_list)} pool(s) safe but not attractive right now ({scan.VERDICT_WATCH}) -- "
                   f"see `scan --with-range` to browse them.")
         print(f"\n{il_model.MODEL_APY_CAVEAT}")
+        print(f"\n{config.DYOR_DISCLAIMER}")
         return
 
     top = tradeable[0]
@@ -455,6 +461,7 @@ def cmd_recommend(args):
         print(f"({len(unscoreable)} pool(s) could not be evaluated at all -- data/coverage issue, not a safety verdict.)")
 
     print(f"\n{il_model.MODEL_APY_CAVEAT}")
+    print(f"\n{config.DYOR_DISCLAIMER}")
 
 
 def cmd_positions(args):
@@ -725,11 +732,13 @@ def cmd_rebalance_check(args):
             positions=rows,
             any_needs_attention=any(r["needs_attention"] for r in rows),
             market_coverage=market_coverage,
+            dyor_disclaimer=config.DYOR_DISCLAIMER,
             v4_override_reason=args.allow_v4,
         ), indent=2))
     else:
         print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
               "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
+        print(f"\n{config.DYOR_DISCLAIMER}")
 
 
 def _positive_int(s):

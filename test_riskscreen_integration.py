@@ -459,6 +459,7 @@ def test_scan_json_is_pure_json_with_envelope(fake_io, capsys):
     assert "run_id" in data and "as_of" in data
     assert len(data["results"]) == 1
     assert data["coverage"] == {"pools_fetched": 1, "pools_total": 1, "truncated": False}
+    assert data["dyor_disclaimer"] == config.DYOR_DISCLAIMER
 
 
 def test_scan_text_output_notes_truncated_coverage(fake_io, capsys):
@@ -478,6 +479,7 @@ def test_scan_text_output_notes_truncated_coverage(fake_io, capsys):
     out = capsys.readouterr().out
     assert "scanned 1/250 LP pools" in out
     assert "249 more exist" in out
+    assert "Always DYOR" in out  # every text-mode command that judges a pool must carry this
 
 
 def test_positions_json_is_pure_json_with_envelope(fake_io, capsys):
@@ -549,6 +551,7 @@ def test_range_text_output_shows_il_column_and_capital_simulation(fake_io, capsy
     for line in data_lines:
         assert "%" in line  # il/net_apy percentages present
     assert "model estimate, not a promised return" in out
+    assert "Always DYOR" in out  # cmd_range must carry the disclaimer too, not just scan/recommend
     # Real point of confusion this locks in: at this fixture's sigma (~43%), the narrowest
     # preset ranges have Low confidence (near-zero p_active) alongside a small `il` figure --
     # a user reading `il` alone could mistake that for safety. The clarifying note must appear.
@@ -602,6 +605,7 @@ def test_recommend_no_trade_when_nothing_passes_gate(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "NO_TRADE" in out
     assert "Not a recommendation" in out
+    assert "Always DYOR" in out  # every cmd_recommend exit path must carry the disclaimer
 
 
 def test_recommend_refuses_when_unscoreable_ratio_too_high(monkeypatch, capsys):
@@ -681,6 +685,7 @@ def test_rebalance_check_evaluates_every_investment_id_worst_case(monkeypatch, c
     assert ids_by_id["bad"]["evaluated"] is False
     assert pos["unevaluated_count"] == 1
     assert pos["needs_attention"] is True
+    assert data["dyor_disclaimer"] == config.DYOR_DISCLAIMER
 
 
 def test_rebalance_check_names_best_alternative_and_switch_verdict(monkeypatch, capsys):
