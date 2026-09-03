@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-lint.txt
+      - run: pip install -r requirements.txt -r requirements-lint.txt
       - run: ruff check .
       - run: mypy riskscreen.py test_riskscreen.py test_riskscreen_integration.py
       - run: pip-audit -r requirements.txt -r requirements-lint.txt
