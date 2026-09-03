@@ -46,9 +46,9 @@ implemented directly as `_il_at_price_ratio(k)`. This is exact for a full-range 
 
 For a driftless lognormal price with annualized volatility $\sigma$ over horizon $T$ (in years), the expected impermanent loss for a **full-range** position is well-approximated by
 
-$$\mathbb{E}[\mathrm{IL}] \approx \frac{\sigma^2 T}{8}$$
+$$\mathbb{E}[\mathrm{IL}] \approx \min\!\left(\frac{\sigma^2 T}{8},\ 1\right)$$
 
-implemented as `expected_il_fraction(sigma_annual)` (with $T=1$). This is the standard diffusion approximation of constant-product IL — a small-move Taylor expansion of $\mathrm{IL}(k)$ around $k=1$, integrated over a lognormal price path. It is a floor/approximation, not the exact realized IL for a narrow (concentrated) range; §6.4 gives the range-adjusted version actually used for concentrated positions.
+implemented as `expected_il_fraction(sigma_annual)` (with $T=1$). This is the standard diffusion approximation of constant-product IL — a small-move Taylor expansion of $\mathrm{IL}(k)$ around $k=1$, integrated over a lognormal price path — capped at $1$: the uncapped quadratic is only a small-$\sigma$ approximation and diverges past $\sigma=\sqrt{8}\approx283\%$ annualized, while the true IL (§3.1) asymptotically approaches but never reaches $100\%$ even at $p_a\to0,\ p_b\to\infty$. Not a hypothetical — confirmed on a real pool (a Trump Media stock-token pool, $\sigma\approx310\%$ annualized) whose uncapped estimate came out to $\approx120\%$, a value the model's own IL definition says is impossible. It is a floor/approximation, not the exact realized IL for a narrow (concentrated) range; §6.4 gives the range-adjusted version actually used for concentrated positions, which was already correctly capped against the exact boundary IL.
 
 **Model net APY** for a full-range position is then
 

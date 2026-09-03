@@ -59,11 +59,15 @@ needed, unlike a crypto/crypto pair.
 For a constant-product AMM, the standard diffusion approximation gives:
 
 ```
-E[IL] ≈ σ² / 8      (annualized, full-range / V2-style liquidity)
+E[IL] ≈ min(σ² / 8, 1.0)      (annualized, full-range / V2-style liquidity)
 ```
 
 where `σ` is the token's annualized volatility, estimated from its on-chain
-kline history.
+kline history, and the result is capped at 100% -- true IL asymptotically
+approaches but never reaches 100%, even at an infinitely wide range; the
+uncapped quadratic is only a small-`σ` approximation and diverges past
+`σ = √8 ≈ 283%` annualized (confirmed on a real pool this volatile, not a
+synthetic edge case -- see "Recently shipped").
 
 **Volatility estimator**: for stablecoin-quoted pools, `σ` now comes from
 the **Yang-Zhang estimator** (Yang & Zhang, 2000, *"Drift-Independent
@@ -389,8 +393,8 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 160 tests total. `test_riskscreen.py`
-(132) covers pure-math/pure-logic functions with no I/O at all.
+test_riskscreen_integration.py` runs 161 tests total. `test_riskscreen.py`
+(133) covers pure-math/pure-logic functions with no I/O at all.
 `test_riskscreen_integration.py` (28) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
@@ -665,6 +669,32 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (expected_il_fraction could exceed 100% -- a real math bug)
+
+Found by a user asking "why is this pool's net APY so different from before" --
+investigating turned up two answers, one being a genuine bug. A pool's
+expected-IL row in `range --side straddle`'s "full" range showed **il =
+119.8%**, an impossible number under this model's own definition (true IL
+asymptotically approaches but never reaches 100%, even at an infinitely
+wide range -- see MODEL.md §3.1). Root cause: `expected_il_fraction`
+(`sigma^2/8`) is only a small-`σ` Taylor approximation and silently
+diverges past `σ = √8 ≈ 283%` annualized; the pool in question (a Trump
+Media stock token) has `σ ≈ 310%` -- a real, currently-live pool, not a
+contrived edge case. `range_metrics()` already capped its own diffusion
+term against the exact boundary IL for finite ranges; this function (used
+for the full-range case and for every pool's base, no-range
+`model_net_apy`) didn't have the same cap. Fixed at the source, in
+`expected_il_fraction` itself, so both call sites (`risk_adjusted_apy` and
+`recommend_range`'s synthetic full-range row) get it for free. Net effect
+for the pool that surfaced this: the *correct* number is actually more
+attractive than the buggy one (net APY 250.3% → 270.1%) -- the bug was
+overstating risk, not understating it, though the reverse (overstating a
+pool's attractiveness) was equally possible for a different apy/`σ`
+combination. 1 new test, MODEL.md/README math corrected. Separately: the
+apy/TVL jump that prompted the question in the first place is real market
+movement, not a bug -- `MODEL_APY_CAVEAT` already covers why (platform apy
+is a blended, undated fee+incentive figure that can swing sharply).
 
 ### Recently shipped (MODEL.pdf removed -- it was most of the install payload)
 

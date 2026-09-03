@@ -8,13 +8,26 @@ import math
 
 
 def expected_il_fraction(sigma_annual):
-    """Diffusion approximation for constant-product AMM IL: E[IL] ~= sigma^2 * T / 8.
+    """Diffusion approximation for constant-product AMM IL: E[IL] ~= sigma^2 * T / 8, capped at
+    1.0 (100%).
 
     Valid for full-range (V2-style) liquidity over T=1 year, ignoring drift.
     Concentrated (V3) positions amplify this by roughly 1/range_width_factor;
     callers should treat this as a floor, not the realized IL for a narrow range.
+
+    The cap: true IL asymptotically approaches but never reaches 100% even in the limit of an
+    infinitely wide range (pa -> 0, pb -> infinity) -- see _il_at_price_ratio, whose exact
+    closed-form value tends to 1.0 as k -> 0 or k -> infinity, never past it. The uncapped
+    diffusion formula above is only a small-sigma Taylor approximation and silently diverges
+    past sigma = sqrt(8) ~= 283% annualized. Not a hypothetical: confirmed live on a real pool
+    (a Trump Media stock-token pool, sigma ~= 310% annualized -- DJT is genuinely that
+    volatile) whose uncapped "expected IL" came out to ~120%, a value the model's own IL
+    definition says is impossible. range_metrics() was already correct here (it computes its
+    own diffusion term and caps it against the exact boundary IL before using it) -- this
+    function is the one other place IL gets computed (the full-range, M=1 case), so it gets
+    the same cap.
     """
-    return (sigma_annual ** 2) / 8
+    return min((sigma_annual ** 2) / 8, 1.0)
 
 
 def breakeven_volatility(apy):

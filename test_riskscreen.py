@@ -104,6 +104,20 @@ def test_expected_il_fraction_scales_with_variance():
     assert expected_il_fraction(0.0) == 0.0
 
 
+def test_expected_il_fraction_capped_at_one_for_extreme_volatility():
+    # Real bug this locks in: the raw diffusion formula sigma^2/8 is only a small-sigma Taylor
+    # approximation and silently exceeds 1.0 past sigma = sqrt(8) ~= 283% annualized -- confirmed
+    # live on a real pool (a stock this volatile in practice, sigma ~310%) whose uncapped
+    # "expected IL" came out to ~120%, which is impossible under this model's own IL definition
+    # (true IL asymptotically approaches but never reaches 100%, even at pa->0, pb->infinity --
+    # see _il_at_price_ratio). 310% is not a synthetic edge case; it's what a real user saw.
+    assert expected_il_fraction(3.10) == 1.0
+    assert expected_il_fraction(5.0) == 1.0
+    # just under the sqrt(8) ~= 2.828 threshold, the formula is still below the cap and unaffected
+    assert expected_il_fraction(2.8) == pytest.approx(2.8 ** 2 / 8)
+    assert expected_il_fraction(2.8) < 1.0
+
+
 def test_breakeven_volatility_inverts_expected_il():
     apy = 0.30
     sigma_star = breakeven_volatility(apy)

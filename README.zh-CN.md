@@ -49,10 +49,14 @@ IL 几乎完全由股票代币自身的波动率决定——不需要像加密�
 对恒定乘积做市商（AMM），标准的扩散近似给出：
 
 ```
-E[IL] ≈ σ² / 8      （年化，满区间 / V2风格流动性）
+E[IL] ≈ min(σ² / 8, 1.0)      （年化，满区间 / V2风格流动性）
 ```
 
-其中 `σ` 是代币的年化波动率，用链上K线历史估算。
+其中 `σ` 是代币的年化波动率，用链上K线历史估算，结果封顶在100%——真实
+IL 就算区间宽到无穷大，也只是无限逼近100%、永远到不了；没封顶的这个二
+次公式只是小`σ`情况下的近似，`σ = √8 ≈ 283%` 年化以上就会发散（这是拿
+一个真实存在、波动率就是这么大的池子验证过的，不是编出来的极端情况——
+见"最近完成的"）。
 
 **波动率估计器**：对于稳定币计价的池子，`σ` 现在来自 **Yang-Zhang 估计器**
 （Yang & Zhang，2000年，*"Drift-Independent Volatility Estimation Based on
@@ -333,8 +337,8 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` 总共跑160个测试。`test_riskscreen.py`
-（132个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
+test_riskscreen_integration.py` 总共跑161个测试。`test_riskscreen.py`
+（133个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
 `test_riskscreen_integration.py`（28个）端到端地跑
 `run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
 mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
@@ -560,6 +564,28 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（expected_il_fraction 可能超过100%——一个真实的数学bug）
+
+用户问了一句"为什么这个池子的净APY跟之前差这么多"，查下去发现两个原
+因，其中一个是真bug。`range --side straddle` 的"full"（满区间）那一行
+显示 **il = 119.8%**，这在模型自己的定义下是不可能的数字（真实IL就算
+区间宽到无穷大，也只是无限逼近100%、永远到不了——见 MODEL.md §3.1）。
+根因：`expected_il_fraction`（`sigma^2/8`）只是小`σ`情况下的泰勒近似，
+`σ = √8 ≈ 283%` 年化以上就会悄悄发散；触发这个问题的池子（一个Trump
+Media股票代币）`σ ≈ 310%`——是一个真实存在、现在还活着的池子，不是编
+出来的极端情况。`range_metrics()` 对有限区间早就正确地把扩散项跟精确
+边界IL做了封顶；这个函数（用于满区间情形，以及每个池子不带区间的基础
+`model_net_apy`）之前没有同样的封顶。已经在源头——`expected_il_fraction`
+本身——修好，这样两处调用（`risk_adjusted_apy` 和
+`recommend_range`里合成的满区间那一行）都自动跟着对了。触发这个问题的
+那个池子，修复后的**正确数字反而比bug时更划算**（净APY 250.3% →
+270.1%）——这次bug是把风险算得比实际更高，不是更低，但换一个apy/`σ`组
+合，反过来把某个池子算得比实际更诱人也是完全可能的。新增1个测试，
+MODEL.md/README 里的公式也一并改正。另外：最开始引出这个问题的
+apy/TVL大幅变动，本身是真实的市场变化，不是bug——`MODEL_APY_CAVEAT`
+早就说明了原因（平台的apy是一个混合了手续费和激励、没有时间戳的数
+字，本来就可能剧烈波动）。
 
 ### 最近完成的（移除 MODEL.pdf——它占了安装体积的大头）
 
