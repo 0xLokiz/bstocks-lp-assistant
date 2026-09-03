@@ -356,9 +356,9 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 154 tests total. `test_riskscreen.py`
+test_riskscreen_integration.py` runs 155 tests total. `test_riskscreen.py`
 (132) covers pure-math/pure-logic functions with no I/O at all.
-`test_riskscreen_integration.py` (22) exercises `run_scan`/`cmd_*` end to
+`test_riskscreen_integration.py` (23) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
 `_get()`, with fake dispatchers keyed by call signature; every
@@ -605,6 +605,31 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (three more findings from real usage)
+
+- **`range`'s text table now shows an explicit `il` column.** Impermanent
+  loss was previously only implicit (`eff.apy` minus `net_apy`, never
+  shown as its own number) — a user asked to see it directly rather than
+  do the subtraction themselves. Added to both the straddle and
+  sided-range (`--side sell`/`buy`) tables.
+- **`--capital` now simulates `$/yr` for every range width, not just the
+  recommended one.** Previously only the single recommended range got a
+  dollar figure (in a summary line below the table); now every row gets
+  its own `$/yr @<capital>` column, so "what's the actual dollar
+  difference between ±20% and ±50%" is a glance, not five separate
+  mental multiplications.
+- **`SKILL.md` guidance strengthened on two more real gaps**: chart
+  points must carry a visible identity (a label next to the point),
+  never hover-only — a correct bubble chart is still a failure if you
+  can't tell which bubble is which pool without hovering. And every
+  chart/response now needs to briefly define `vol_ratio`/`p_active`/
+  grade/verdict terms rather than assume the reader already knows them.
+  Presenting a recommendation now has an explicit "full picture" bar:
+  the market-wide chart *and* a range/IL/simulated-return comparison
+  across the top 2-3 pools, not just the single top pick in isolation.
+
+1 new test (155 total, up from 154).
 
 ### Recently shipped (two bugs found by a user's own testing)
 

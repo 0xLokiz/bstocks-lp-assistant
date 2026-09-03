@@ -271,8 +271,64 @@ house style):
   bar chart whose length alone implies "bigger is better" for a metric
   where lower is what's good.
 
+**Every point needs a visible identity, not just a hover tooltip.** A chart
+where you can't tell which point is which pool without hovering fails the
+one job the chart has — confirmed in practice (a real user's own chart: a
+correct bubble scatter, but every bubble the same color and no visible
+label meant "which one is `GOOGLB-USDT`?" needed a hover). Put each pool's
+name directly next to its point/bubble (a small offset text label, or the
+`chartjs-plugin-datalabels` plugin from `cdnjs.cloudflare.com` — loaded
+*after* Chart.js, *before* your inline script) — tooltips are a bonus for
+exact numbers, not the only way to identify a point. If there are enough
+points that direct labels would overlap into noise, label at minimum the
+`ENTER`-verdict / best few points directly and say so in the surrounding
+text ("top 5 labeled directly; hover for the rest").
+
+**Every chart and every block of text needs enough explanation to stand on
+its own.** Don't assume the reader already knows what `vol_ratio`,
+`p_active`, `grade`, or `ENTER`/`WATCH`/`NO_TRADE`/`UNSCOREABLE` mean —
+define each term you use, briefly, the first time it appears in a given
+response (a short parenthetical is enough: "`vol_ratio` — lower is
+richer"). This applies to axis titles and legends in the chart itself
+*and* to the prose around it; a chart with a self-explanatory axis label
+still needs the accompanying text to say what the chart is showing and
+why it matters, not just restate the numbers already visible in it.
+
 Keep the numeric table in the response text too (some users want exact
 figures) — the chart supplements it, it doesn't replace it.
+
+## Presenting a recommendation: the full picture, not just the top pick
+
+A single pool's range breakdown, shown alone, hides two things a user
+actually needs to judge it against: how it compares to the rest of the
+market, and what the tradeoffs look like at different range widths with
+their own money. Whenever you present "the best pool" or answer an
+open-ended "what should I do" question, include all of this, not just the
+top pick's headline number:
+
+1. **The market-wide picture** — the `scan` bubble chart above, across
+   enough pools to show where the top pick sits relative to its
+   alternatives (not just in isolation).
+2. **A focused comparison of the top 2-3 pools** — run
+   `range --investmentId <id> [--capital <amount>]` for each of them (not
+   just the single best one) and show, per pool, the range/IL/net-APY
+   breakdown across candidate widths — `range`'s table already has an
+   explicit `il` column (impermanent loss, separate from net APY, not
+   something the user has to subtract themselves) and, when a capital
+   amount is known or reasonably assumed, a `$/yr` column simulating the
+   actual dollar return at each width. If the user hasn't given a capital
+   amount, pick one reasonable illustrative figure (say so: "assuming a
+   $10k deposit, as an example") rather than skipping the simulation
+   entirely or silently picking a number without flagging it as an
+   example.
+3. **One line tying it together** — why the top pick beats the runners-up
+   (better risk-adjusted yield, safer at similar yield, or a real gap in
+   TVL/capacity), not just a repeat of the numbers already shown.
+
+This is the default depth for a recommendation, not an occasional extra —
+scale it down only when the user's question is already narrow (a specific
+pool, a specific range width) and the broader comparison wouldn't answer
+anything they asked.
 
 ## Commands
 

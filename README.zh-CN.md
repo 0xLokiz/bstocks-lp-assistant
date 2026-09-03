@@ -304,9 +304,9 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` 总共跑154个测试。`test_riskscreen.py`
+test_riskscreen_integration.py` 总共跑155个测试。`test_riskscreen.py`
 （132个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
-`test_riskscreen_integration.py`（22个）端到端地跑
+`test_riskscreen_integration.py`（23个）端到端地跑
 `run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
 mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
 现；中间的每一个 `fetch_*`/`resolve_*`/`evaluate_*` 函数都是真的在跑。
@@ -510,6 +510,26 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（实际使用中又发现的三个问题）
+
+- **`range` 的文本表格现在带一个明确的 `il` 列。** 无常损失之前只是隐
+  含的（`eff.apy` 减 `net_apy`，从来没作为一个独立数字展示过）——有用
+  户希望能直接看到，不用自己去减。跨价区间和单边区间
+  （`--side sell`/`buy`）的表格都加上了。
+- **`--capital` 现在会给每一档区间都模拟 `$/yr`，不只是推荐的那一
+  档。** 之前只有那一个推荐区间有美元数字（在表格下面单独一行），现
+  在每一行都有自己的 `$/yr @<金额>` 列——"±20%和±50%之间实际差多少
+  钱"变成一眼就能看出来，不用自己心算五次乘法。
+- **`SKILL.md` 的指引针对另外两个真实缺口做了加强**：图表上的每个点
+  必须有肉眼可见的身份标识（点旁边直接标出来），不能只靠悬停——一个
+  技术上正确的气泡图，如果不悬停就看不出哪个泡泡是哪个池子，照样算失
+  败。而且每张图/每段回复现在都要求简单解释一下 `vol_ratio`/
+  `p_active`/grade/verdict这些术语，不能假设读者已经知道。给出建议
+  的时候现在有一条明确的"完整画面"底线：既要有全市场的图，也要有排
+  名前2-3个池子的区间/IL/模拟收益对比，不能只孤零零地给一个Top pick。
+
+新增1个测试（总共155个，此前154个）。
 
 ### 最近完成的（用户自己测试发现的两个bug）
 

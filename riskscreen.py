@@ -1401,35 +1401,46 @@ def cmd_range(args):
             print(f"  {label_s:<22} net_apy {stressed['model_net_apy']*100:>8.2f}%   "
                   f"confidence {confidence_grade(stressed['p_active'])}")
         print()
+    dollar_col = "{:>14}".format(f"$/yr @{args.capital:,.0f}") if args.capital else ""
     if args.side == "straddle":
-        print(f"{'range':>10}{'concentration':>14}{'confidence':>12}{'eff.apy':>10}{'net_apy':>10}")
+        print(f"{'range':>10}{'concentration':>14}{'confidence':>12}{'eff.apy':>10}{'il':>9}{'net_apy':>10}{dollar_col}")
         for r in rows:
             width = f"+/-{(r['pb']-1)*100:.0f}%" if r["pb"] is not None else "full"
             marker = "  <- recommended" if r is best else ""
+            dollar_cell = f"{args.capital * r['model_net_apy']:>+14,.0f}" if args.capital else ""
             print(f"{width:>10}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
-                  f"{r['effective_apy']*100:>9.2f}%{r['model_net_apy']*100:>9.2f}%{marker}")
-        print("\n(confidence = probability of staying in range a year, bucketed High/Moderate/Low; "
-              "recommended = best net_apy at Moderate-or-better confidence. Full numbers: --json on scan.)")
+                  f"{r['effective_apy']*100:>9.2f}%{r['expected_il']*100:>8.2f}%{r['model_net_apy']*100:>9.2f}%"
+                  f"{dollar_cell}{marker}")
+        print("\n(concentration = leverage on fees *and* IL from concentrating liquidity into this "
+              "range, vs full-range; confidence = probability of staying in range a year, bucketed "
+              "High/Moderate/Low; il = expected impermanent loss for this range (already subtracted "
+              "out of eff.apy to get net_apy); recommended = best net_apy at Moderate-or-better "
+              "confidence. Full numbers: --json on scan.)")
     else:
-        print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'confidence':>12}{'net_apy':>10}")
+        print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'confidence':>12}{'il':>9}{'net_apy':>10}{dollar_col}")
         for r in rows:
             offset_pct = abs((r["pa"] if args.side == "sell" else r["pb"]) - 1) * 100
             band = f"[{r['pa']:.2f}, {r['pb']:.2f}]x"
             tag = " (your target)" if r.get("is_target") else ""
             marker = "  <- recommended" if r is best else ""
+            dollar_cell = f"{args.capital * r['model_net_apy']:>+14,.0f}" if args.capital else ""
             print(f"{offset_pct:>9.0f}%{band:>18}{r['concentration']:>14.2f}{confidence_grade(r['p_active']):>12}"
-                  f"{r['model_net_apy']*100:>9.2f}%{marker}{tag}")
+                  f"{r['expected_il']*100:>8.2f}%{r['model_net_apy']*100:>9.2f}%{dollar_cell}{marker}{tag}")
         verb = "rises into" if args.side == "sell" else "falls into"
         print(f"\n(yield-enhanced limit {'sell' if args.side == 'sell' else 'buy'} order -- earns fees "
-              f"only once price {verb} the band; confidence = probability that ever happens within a year.)")
+              f"only once price {verb} the band; il = expected impermanent loss for this range "
+              f"(already subtracted out of net_apy); confidence = probability that ever happens "
+              f"within a year.)")
         if args.target_offset is None:
             print("(want an exact target instead of these presets? add "
                   "--target-offset 0.15 for +/-15% from current price, plus optional --band-width.)")
 
     if args.capital:
+        print(f"\n($/yr @{args.capital:,.0f} above is model_net_apy simulated on your deposit size "
+              f"for each range -- a model estimate, not a promised return; see the caveat below.)")
         if pool_tvl is None:
-            print("\n(--capital given, but this is a --ticker/--apy estimate with no live pool "
-                  "TVL to size a position against -- use --investmentId for position sizing.)")
+            print("(--capital given, but this is a --ticker/--apy estimate with no live pool "
+                  "TVL to size a position against -- use --investmentId for a TVL-share warning too.)")
         else:
             note = position_sizing_note(args.capital, pool_tvl, best["model_net_apy"])
             print(f"\nAt ${args.capital:,.0f} in the recommended range: "

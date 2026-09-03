@@ -367,6 +367,49 @@ def test_rebalance_check_json_error_envelope_on_position_fetch_failure(monkeypat
     assert "session expired" in data["error"]
 
 
+# ---- range: explicit IL column + per-row capital simulation ----
+
+def test_range_text_output_shows_il_column_and_capital_simulation(fake_io, capsys):
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}], apy_bps=3000)
+    # alternating returns for a real, non-zero sigma (a constant daily_return gives sigma=0,
+    # which would make every range width look equally "safe" and defeat the point of this test)
+    returns = [0.02, -0.015] * 30
+    rows = []
+    price = 100.0
+    t = 0
+    for r in returns:
+        o = price
+        c = price * (1 + r)
+        h = max(o, c) * 1.01
+        lo = min(o, c) * 0.99
+        rows.append([t, str(o), str(h), str(lo), str(c), "1000", t])
+        price = c
+        t += DAY_MS
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = rows
+
+    args = riskscreen.build_parser().parse_args(
+        ["range", "--investmentId", "inv1", "--capital", "10000"])
+    riskscreen.cmd_range(args)
+
+    out = capsys.readouterr().out
+    header_line = next(line for line in out.splitlines() if "concentration" in line and "il" in line)
+    il_col = header_line.index("il")
+    net_apy_col = header_line.index("net_apy")
+    assert il_col < net_apy_col  # il column comes before net_apy, as documented
+    assert "$/yr @10,000" in out
+    # every data row (marked by a leading "+/-" or "full") should carry a dollar figure
+    data_lines = [line for line in out.splitlines() if line.strip().startswith(("+/-", "full"))]
+    assert len(data_lines) >= 5
+    for line in data_lines:
+        assert "%" in line  # il/net_apy percentages present
+    assert "model estimate, not a promised return" in out
+
+
 # ---- recommend: NO_TRADE, refuse-threshold, position-fetch-failure ----
 
 def test_recommend_no_trade_when_nothing_passes_gate(monkeypatch, capsys):
