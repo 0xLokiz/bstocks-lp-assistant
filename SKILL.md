@@ -257,7 +257,15 @@ house style):
   red for Cheap — never a single uniform color across every bubble).
   Label the x-axis "vol_ratio (lower = richer/cheaper)" explicitly, and
   add a vertical reference line at `vol_ratio = 1.0` marking the
-  `ENTER`/`WATCH` boundary. This framing matters because a bare bar chart
+  `ENTER`/`WATCH` boundary. **Use a log scale on the x-axis** whenever the
+  scanned pools' `vol_ratio` spans more than roughly a 5x range (routine —
+  it commonly runs from <0.1 to >2 in one scan): on a linear axis the
+  cheap/interesting pools all bunch into the leftmost sliver while 1-2
+  outlier `WATCH` pools waste most of the width, which is exactly what
+  causes the point-overlap problem described below. A log x-axis spreads
+  the dense, actually-relevant cluster out and compresses the outliers —
+  fixes the crowding at its source instead of fighting it with label
+  placement alone. This framing matters because a bare bar chart
   of raw `vol_ratio` is actively misleading, confirmed in practice (a real
   user's own chart, not a hypothetical): sorted ascending with bars scaled
   to `vol_ratio`, the *worst* pools (highest `vol_ratio`, Cheap-graded) get
@@ -274,22 +282,38 @@ house style):
 **Every point needs a visible identity, not just a hover tooltip — and a
 label with no leader line is still ambiguous in a dense cluster.** A chart
 where you can't tell which point is which pool without hovering fails the
-one job the chart has — confirmed in practice through two rounds with the
-same real user: round one had no labels at all ("which one is
+one job the chart has — confirmed in practice through three rounds with
+the same real user: round one had no labels at all ("which one is
 `GOOGLB-USDT`?" needed a hover); round two added labels at a fixed offset
-next to each point, and it *still* wasn't legible enough, because in a
-tight cluster (several pools close in both axes) a same-direction offset
-label can sit ambiguously between two points or overlap a neighboring
-label. The fix that actually holds up: place each label wherever there's
-room (try a few candidate offsets — right, upper-right, lower-right, left
-— and skip to the next one if it would overlap an already-placed label),
-then draw a short leader line (thin, `--text-muted`-ish gray, 1px) from
-the point's edge to wherever the label ended up. The leader line is what
-makes the association unambiguous regardless of final label position —
-don't skip it just because the label is "close enough" to its point.
-Label at minimum the `ENTER`-verdict / best few points this way, and say
-so in the surrounding text if not every point got one ("top 6 labeled;
-hover for the rest").
+next to each point, and it still wasn't legible enough, because in a tight
+cluster a same-direction offset label can sit ambiguously between two
+points or overlap a neighbor; round three added a handful of candidate
+offset positions (right, upper-right, lower-right, left — skip one that
+would overlap an already-placed label) plus a leader line, and *that
+still* wasn't enough once the real data had several pools within a few
+pixels of each other vertically — no small fixed offset avoids a neighbor
+that close, no matter which of 4-6 directions is tried.
+
+The fix that actually holds up on real (not hand-picked) data: don't
+search for room near the point at all — stack the labels in a single
+column in the chart's open margin (e.g. to the right of the plot area),
+sorted top-to-bottom by each point's natural vertical position, with a
+minimum row gap enforced by a greedy pass (`finalY = max(naturalY,
+previousLabel.finalY + rowGap)`, then shift the whole stack up if it ran
+past the bottom edge). This *guarantees* zero label-label overlap by
+construction, regardless of how dense the underlying cluster is — the
+trade-off is a longer leader line for points whose natural position is far
+from their assigned row, which is the right trade: a long unambiguous line
+beats a short ambiguous one every time. Draw a plain leader line (thin,
+`--text-muted`-ish gray, 1px) from the point's edge to the label's row in
+the column. Reserve enough right-margin padding for the longest label text
+(measure it, or budget generously — a truncated or clipped label is its
+own legibility bug), and give the canvas enough height that a full label
+stack (row count × row gap) actually fits without cramming — 500-600px is
+a reasonable default once 8-10 points are labeled, taller than a plain
+unlabeled scatter would need. Label at minimum the `ENTER`-verdict / best
+few points this way, and say so in the surrounding text if not every point
+got one ("top 10 labeled; hover for the rest").
 
 **Keep bubbles small enough to read, especially in a dense cluster.** A
 second real problem observed in practice, on the same chart as above:

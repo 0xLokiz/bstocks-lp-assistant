@@ -606,6 +606,24 @@ already built.
   store is most of what a paper-trading harness would need to replay
   against anyway).
 
+### Recently shipped (a third round on chart legibility — the labels still overlapped)
+
+Round two's fix (a few candidate offset positions plus a leader line) still
+wasn't enough once tested against real, dense data: several top-10 pools
+sat within a few pixels of each other vertically, and no small fixed
+offset in 4-6 directions avoids a neighbor that close. Two changes, both
+in `SKILL.md`: (1) the `scan` chart's x-axis (`vol_ratio`) is now
+logarithmic whenever the scanned range spans more than ~5x, which spreads
+the dense, actually-relevant cluster out instead of letting 1-2 outlier
+`WATCH` pools waste most of the linear axis's width; (2) label placement
+no longer searches for open space near each point — it stacks labels in a
+single column in the chart's margin, sorted by natural vertical position
+with a minimum row gap enforced by a greedy push-down pass, which
+guarantees zero label-label overlap by construction regardless of cluster
+density. The trade-off is a longer leader line for points far from their
+assigned row — confirmed as the right trade with the same real user
+("引导线可以更长一点" — leader lines can be longer, that's fine).
+
 ### Recently shipped (a user asked "does this cover every bStock pool?")
 
 A live investigation to answer that question found: 496 LP pools exist
