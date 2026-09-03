@@ -317,6 +317,18 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
             continue
 
         scored = evaluation["scored"]
+        if scored["model_net_apy"] is None:
+            # sigma/apy were both resolvable (this pool isn't in Pass 1's unscoreable list), but
+            # volatility is high enough that expected_il_fraction can't produce a valid full-range
+            # IL estimate (see its docstring) -- surfaced the same way as any other "couldn't
+            # score this" reason, not silently dropped or forced into a WATCH/ENTER verdict with
+            # a numeric net_apy that doesn't actually exist.
+            unscoreable.append((pool.get("investmentName"),
+                                 f"volatility too extreme ({sigma*100:.0f}% annualized) for the "
+                                 f"diffusion IL approximation to stay valid -- model_net_apy cannot "
+                                 f"be estimated for a full-range position at this pool's volatility"))
+            continue
+
         result = {
             "protocol": pool.get("protocolName"),
             "pool": pool.get("investmentName"),

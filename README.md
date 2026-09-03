@@ -59,15 +59,18 @@ needed, unlike a crypto/crypto pair.
 For a constant-product AMM, the standard diffusion approximation gives:
 
 ```
-E[IL] ≈ min(σ² / 8, 1.0)      (annualized, full-range / V2-style liquidity)
+E[IL] ≈ σ² / 8      (annualized, full-range / V2-style liquidity -- only valid while this is < 1.0)
 ```
 
 where `σ` is the token's annualized volatility, estimated from its on-chain
-kline history, and the result is capped at 100% -- true IL asymptotically
-approaches but never reaches 100%, even at an infinitely wide range; the
-uncapped quadratic is only a small-`σ` approximation and diverges past
-`σ = √8 ≈ 283%` annualized (confirmed on a real pool this volatile, not a
-synthetic edge case -- see "Recently shipped").
+kline history. This is only a small-`σ` approximation, and it diverges past
+`σ = √8 ≈ 283%` annualized -- past that point the model returns **N/A**
+rather than a number (an earlier version clamped to 100%, which looked
+safe but is still false precision once the approximation has left the
+regime it was derived for -- confirmed on a real pool this volatile, not
+a synthetic edge case; see "Recently shipped"). Concentrated-range figures
+don't have this problem -- they're anchored to the exact boundary IL
+instead, which stays valid at any volatility.
 
 **Volatility estimator**: for stablecoin-quoted pools, `σ` now comes from
 the **Yang-Zhang estimator** (Yang & Zhang, 2000, *"Drift-Independent
@@ -393,9 +396,9 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 161 tests total. `test_riskscreen.py`
-(133) covers pure-math/pure-logic functions with no I/O at all.
-`test_riskscreen_integration.py` (28) exercises `run_scan`/`cmd_*` end to
+test_riskscreen_integration.py` runs 164 tests total. `test_riskscreen.py`
+(135) covers pure-math/pure-logic functions with no I/O at all.
+`test_riskscreen_integration.py` (29) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
 `_get()`, with fake dispatchers keyed by call signature; every
@@ -669,6 +672,30 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (round two on the IL bug: N/A beats a capped guess)
+
+The 100%-cap fix below (same day) turned out not to be the right fix --
+caught by the same real user, same session: "but IL wouldn't actually
+behave this way; you should return N/A here instead." Right call. Past
+`σ = √8 ≈ 283%` annualized, `expected_il_fraction`'s diffusion
+approximation hasn't just hit a ceiling -- it has left the small-`σ`
+regime it was ever derived for, so clamping to 1.0 is still false
+precision, just dressed up as a "safe-looking" number instead of an
+absurd one. `expected_il_fraction` now returns `None` past that
+threshold; `risk_adjusted_apy`, `recommend_range`'s synthetic full-range
+row, and `run_scan` all propagate that honestly -- a pool this volatile
+can no longer be ranked or given a numeric verdict on the full-range
+figure, so it now lands in `unscoreable` (the same bucket as any other
+"resolved sigma/apy but still couldn't score this" case) rather than
+silently getting a WATCH/ENTER verdict built on a number that doesn't
+exist. `cmd_range`'s text tables print `N/A` for the affected row, with
+an inline explanation, and the range recommendation itself is never
+picked from a `None` row -- it falls back to a concentrated range, which
+stays valid at any volatility because it's anchored to the exact boundary
+IL rather than the diffusion approximation. 5 new/updated tests, MODEL.md
+and both READMEs corrected again to match. Verified live against the same
+real pool (DJTB) that surfaced both rounds of this.
 
 ### Recently shipped (MODEL_APY_CAVEAT: volume/TVL noise, not just incentives)
 

@@ -161,7 +161,8 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
         rows.append({
             "pa": None, "pb": None, "mode": "market_making", "concentration": 1.0,
             "p_active": 1.0, "effective_apy": pool_apy, "expected_il": il,
-            "model_net_apy": pool_apy - il, "vol_ratio": il_model.vol_richness_ratio(sigma_annual, pool_apy),
+            "model_net_apy": (pool_apy - il) if il is not None else None,
+            "vol_ratio": il_model.vol_richness_ratio(sigma_annual, pool_apy),
         })
     elif side == "sell":
         for offset in DEFAULT_SIDED_OFFSETS:
@@ -183,6 +184,13 @@ def recommend_range(pool_apy, sigma_annual, side="straddle", years=1.0,
             rows.append(row)
     else:
         raise ValueError(f"unknown side {side!r}")
-    safe = [r for r in rows if r["p_active"] >= SAFETY_P_ACTIVE_FLOOR]
-    best = max(safe or rows, key=lambda r: r["model_net_apy"])
+    # A row with model_net_apy=None (only possible for the straddle full-range row, at
+    # volatility beyond where expected_il_fraction can produce a valid estimate) can never be
+    # "recommended" -- there's nothing to rank it by. The concentrated rows never hit this (they
+    # fall back to the exact boundary IL, valid at any volatility -- see range_metrics), so
+    # excluding None rows here still leaves a real candidate to pick from in every case this
+    # function is actually called with.
+    rankable = [r for r in rows if r["model_net_apy"] is not None]
+    safe = [r for r in rankable if r["p_active"] >= SAFETY_P_ACTIVE_FLOOR]
+    best = max(safe or rankable, key=lambda r: r["model_net_apy"])
     return rows, best

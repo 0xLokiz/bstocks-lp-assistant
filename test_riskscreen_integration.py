@@ -311,6 +311,40 @@ def test_run_scan_coverage_reports_complete_when_last_page_is_short(fake_io):
     assert coverage == {"pools_fetched": 1, "pools_total": 1, "truncated": False}
 
 
+def test_run_scan_routes_unscoreable_il_to_unscoreable_not_a_fake_verdict(fake_io):
+    # Real bug this locks in, end to end: a pool volatile enough that expected_il_fraction can't
+    # produce a valid model_net_apy (see il_model.py) must not crash run_scan's sort()/verdict
+    # classification, and must not silently get labeled ENTER or WATCH with a net_apy that
+    # doesn't actually exist -- it belongs in `unscoreable`, the same bucket as any other "we
+    # resolved sigma/apy but still couldn't score this" case.
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry("inv1", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}])
+    # Alternating +40%/-32% daily swings -> annualized sigma ~= 304%, comfortably past the
+    # sqrt(8) ~= 283% threshold where the diffusion IL approximation stops being valid.
+    rows = []
+    price, t = 100.0, 0
+    for r in [0.40, -0.32] * 30:
+        o = price
+        c = price * (1 + r)
+        h, lo = max(o, c) * 1.01, min(o, c) * 0.99
+        rows.append([t, str(o), str(h), str(lo), str(c), "1000", t])
+        price, t = c, t + DAY_MS
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = rows
+
+    results, flagged, unscoreable, coverage = scan.run_scan(max_pages=1)
+
+    assert results == []
+    assert flagged == []
+    assert len(unscoreable) == 1
+    assert "volatility too extreme" in unscoreable[0]["reason"]
+    assert unscoreable[0]["verdict"] == scan.VERDICT_UNSCOREABLE
+
+
 # ---- fetch_lp_investments: concurrent multi-page fetch ----
 
 def test_fetch_lp_investments_fetches_additional_pages_concurrently_when_page_one_is_full(fake_io):

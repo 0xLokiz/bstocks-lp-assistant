@@ -46,9 +46,9 @@ implemented directly as `_il_at_price_ratio(k)`. This is exact for a full-range 
 
 For a driftless lognormal price with annualized volatility $\sigma$ over horizon $T$ (in years), the expected impermanent loss for a **full-range** position is well-approximated by
 
-$$\mathbb{E}[\mathrm{IL}] \approx \min\!\left(\frac{\sigma^2 T}{8},\ 1\right)$$
+$$\mathbb{E}[\mathrm{IL}] \approx \frac{\sigma^2 T}{8} \qquad \text{valid only while this is} < 1$$
 
-implemented as `expected_il_fraction(sigma_annual)` (with $T=1$). This is the standard diffusion approximation of constant-product IL — a small-move Taylor expansion of $\mathrm{IL}(k)$ around $k=1$, integrated over a lognormal price path — capped at $1$: the uncapped quadratic is only a small-$\sigma$ approximation and diverges past $\sigma=\sqrt{8}\approx283\%$ annualized, while the true IL (§3.1) asymptotically approaches but never reaches $100\%$ even at $p_a\to0,\ p_b\to\infty$. Not a hypothetical — confirmed on a real pool (a Trump Media stock-token pool, $\sigma\approx310\%$ annualized) whose uncapped estimate came out to $\approx120\%$, a value the model's own IL definition says is impossible. It is a floor/approximation, not the exact realized IL for a narrow (concentrated) range; §6.4 gives the range-adjusted version actually used for concentrated positions, which was already correctly capped against the exact boundary IL.
+implemented as `expected_il_fraction(sigma_annual)` (with $T=1$). This is the standard diffusion approximation of constant-product IL — a small-move Taylor expansion of $\mathrm{IL}(k)$ around $k=1$, integrated over a lognormal price path — and it is *only* that: a small-$\sigma$ approximation. It diverges past $\sigma=\sqrt{8}\approx283\%$ annualized, at which point the true IL (§3.1, which asymptotically approaches but never reaches $100\%$ even at $p_a\to0,\ p_b\to\infty$) is no longer something this formula can honestly estimate. An earlier version of this function clamped the result to $1$ once it crossed that threshold; that was rejected on review — a value beyond $\sigma=\sqrt{8}$ hasn't just hit a ceiling, the approximation has left the regime it was ever derived for, so presenting *any* single number (a "safe-looking" $1.0$ included) is false precision. `expected_il_fraction` instead returns `None` past this threshold, and every caller that reaches a real user (`model_net_apy`, `--json` output, table rows) reports it as `N/A` rather than inventing a figure — confirmed on a real pool (a Trump Media stock-token pool, $\sigma\approx310\%$ annualized) whose diffusion estimate would have been $\approx120\%$, a value the model's own IL definition says is impossible. It is a floor/approximation, not the exact realized IL for a narrow (concentrated) range; §6.4 gives the range-adjusted version actually used for concentrated positions, which stays valid at any volatility because it's anchored to the exact boundary IL, not this approximation.
 
 **Model net APY** for a full-range position is then
 
@@ -165,7 +165,7 @@ Every pool the product ever reports on resolves to exactly one of four verdicts:
 
 | Verdict | Condition |
 |---|---|
-| `UNSCOREABLE` | Sigma or apy could not be computed at all (data fetch failed, no confirmed bStock pairing, insufficient/gappy kline history — §4.3) |
+| `UNSCOREABLE` | Sigma or apy could not be computed at all (data fetch failed, no confirmed bStock pairing, insufficient/gappy kline history — §4.3), **or** sigma was computed but is too extreme (> ~283% annualized) for `expected_il_fraction` to produce a valid full-range IL estimate — §3.2 |
 | `NO_TRADE` | Scored, but `pool_risk_flags()` raised at least one flag (§7) |
 | `ENTER` | Cleared the risk screen **and** `model_net_apy > 0` **and** `vol_ratio < 1` |
 | `WATCH` | Cleared the risk screen, but fails the `ENTER` yield/richness bar |

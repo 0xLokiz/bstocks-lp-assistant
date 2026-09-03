@@ -8,26 +8,28 @@ import math
 
 
 def expected_il_fraction(sigma_annual):
-    """Diffusion approximation for constant-product AMM IL: E[IL] ~= sigma^2 * T / 8, capped at
-    1.0 (100%).
+    """Diffusion approximation for constant-product AMM IL: E[IL] ~= sigma^2 * T / 8.
 
     Valid for full-range (V2-style) liquidity over T=1 year, ignoring drift.
     Concentrated (V3) positions amplify this by roughly 1/range_width_factor;
     callers should treat this as a floor, not the realized IL for a narrow range.
 
-    The cap: true IL asymptotically approaches but never reaches 100% even in the limit of an
-    infinitely wide range (pa -> 0, pb -> infinity) -- see _il_at_price_ratio, whose exact
-    closed-form value tends to 1.0 as k -> 0 or k -> infinity, never past it. The uncapped
-    diffusion formula above is only a small-sigma Taylor approximation and silently diverges
-    past sigma = sqrt(8) ~= 283% annualized. Not a hypothetical: confirmed live on a real pool
-    (a Trump Media stock-token pool, sigma ~= 310% annualized -- DJT is genuinely that
-    volatile) whose uncapped "expected IL" came out to ~120%, a value the model's own IL
-    definition says is impossible. range_metrics() was already correct here (it computes its
-    own diffusion term and caps it against the exact boundary IL before using it) -- this
-    function is the one other place IL gets computed (the full-range, M=1 case), so it gets
-    the same cap.
+    Returns None once the formula's own output would reach or exceed 1.0 (100%), i.e. past
+    sigma = sqrt(8) ~= 283% annualized -- rather than silently clamping to 1.0. A first version
+    of this function did clamp: true IL asymptotically approaches but never reaches 100% even in
+    the limit of an infinitely wide range (see _il_at_price_ratio, whose exact closed-form value
+    tends to 1.0 as k -> 0 or k -> infinity, never past it), so 1.0 looked like a defensible
+    ceiling. But the diffusion formula is only a small-sigma Taylor approximation, and past this
+    threshold it hasn't just hit a ceiling -- it has left the regime it was ever derived to
+    describe, so *any* single number here (including a "safe-looking" 1.0) is false precision
+    dressed up as an estimate. Returning None and letting the caller say so explicitly is more
+    honest than presenting a guess. Confirmed live, not hypothetical: a real pool (a Trump Media
+    stock token, sigma ~= 310% annualized -- DJT is genuinely that volatile) hit this. Callers
+    that can (range_metrics(), for a concrete finite range) fall back to the exact boundary IL
+    instead, which stays valid at any volatility -- see range_model.range_metrics.
     """
-    return min((sigma_annual ** 2) / 8, 1.0)
+    diffusion = (sigma_annual ** 2) / 8
+    return diffusion if diffusion < 1.0 else None
 
 
 def breakeven_volatility(apy):
@@ -71,8 +73,11 @@ def richness_grade(vol_ratio):
 
 
 def risk_adjusted_apy(apy, sigma_annual):
+    """`expected_il`/`model_net_apy` are None when expected_il_fraction can't produce a valid
+    estimate at this volatility (see its docstring) -- `vol_ratio` is unaffected either way,
+    since it's a function of sigma/apy alone, not of the IL estimate."""
     il = expected_il_fraction(sigma_annual)
-    net = apy - il
+    net = apy - il if il is not None else None
     return {
         "apy": apy, "sigma_annual": sigma_annual, "expected_il": il, "model_net_apy": net,
         "vol_ratio": vol_richness_ratio(sigma_annual, apy),

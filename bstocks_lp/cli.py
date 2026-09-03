@@ -65,6 +65,16 @@ from bstocks_lp import (
 )
 
 
+def _pct_or_na(x, width):
+    """Right-align x*100 as a percentage in a field of `width` characters (numeral + '%'), or
+    'N/A' in the same width when x is None -- see il_model.expected_il_fraction: at extreme
+    volatility it returns None rather than a number the diffusion approximation can no longer
+    justify, and this is the one place in text output that value can surface (cmd_range's
+    straddle-mode full-range row; every other row/command is always numeric -- see run_scan,
+    which routes a None model_net_apy to `unscoreable` before it ever reaches a results table)."""
+    return (f"{x*100:.2f}%" if x is not None else "N/A").rjust(width)
+
+
 def cmd_stocks(args):
     tokens = market_data.fetch_stock_tokens(type_filter=args.type)
     for t in tokens[: args.limit]:
@@ -90,8 +100,9 @@ def cmd_vol(args):
             be_str = f", Richness Score @ {args.apy*100:.0f}% APY = {grade}"
         else:
             be_str = ""
+        il_str = f"{il*100:.2f}%" if il is not None else "N/A (volatility too extreme for the diffusion approximation)"
         print(f"{t['symbol']} (chain {t['chainId']}): annualized vol = {sigma*100:.2f}%, "
-              f"est. full-range IL/yr = {il*100:.2f}%{be_str}")
+              f"est. full-range IL/yr = {il_str}{be_str}")
 
 
 def cmd_scan(args):
@@ -268,15 +279,27 @@ def cmd_range(args):
         for r in rows:
             width = f"+/-{(r['pb']-1)*100:.0f}%" if r["pb"] is not None else "full"
             marker = "  <- recommended" if r is best else ""
-            dollar_cell = f"{args.capital * r['model_net_apy']:>+14,.0f}" if args.capital else ""
+            if args.capital and r["model_net_apy"] is not None:
+                dollar_cell = f"{args.capital * r['model_net_apy']:>+14,.0f}"
+            elif args.capital:
+                dollar_cell = "N/A".rjust(14)
+            else:
+                dollar_cell = ""
             print(f"{width:>10}{r['concentration']:>14.2f}{range_model.confidence_grade(r['p_active']):>12}"
-                  f"{r['effective_apy']*100:>9.2f}%{r['expected_il']*100:>8.2f}%{r['model_net_apy']*100:>9.2f}%"
+                  f"{r['effective_apy']*100:>9.2f}%{_pct_or_na(r['expected_il'], 9)}{_pct_or_na(r['model_net_apy'], 10)}"
                   f"{dollar_cell}{marker}")
         print("\n(concentration = leverage on fees *and* IL from concentrating liquidity into this "
               "range, vs full-range; confidence = probability of staying in range a year, bucketed "
               "High/Moderate/Low; il = expected impermanent loss for this range (already subtracted "
               "out of eff.apy to get net_apy); recommended = best net_apy at Moderate-or-better "
               "confidence. Full numbers: --json on scan.)")
+        if any(r["model_net_apy"] is None for r in rows):
+            print("(N/A = this range's expected IL couldn't be estimated -- volatility this high "
+                  "(> ~283% annualized) is outside where the diffusion approximation this model "
+                  "uses stays valid, so it returns no number rather than a guess dressed up as "
+                  "one; the concentrated-range rows above use the exact boundary IL instead, "
+                  "which stays valid at any volatility, and 'recommended' is always picked from "
+                  "those.)")
     else:
         print(f"{'offset':>10}{'band':>18}{'concentration':>14}{'confidence':>12}{'il':>9}{'net_apy':>10}{dollar_col}")
         for r in rows:
@@ -525,7 +548,9 @@ def _evaluate_held_investment_id(investment_id, stock_index, market_results, all
     outside the fetched pages), via the same evaluate_pool() path scan uses -- including
     peer_apys and protocol_security_score, so this fallback can't reach a laxer conclusion
     than scan would have for the same pool. Returns (vol_ratio, model_net_apy, flags, evaluated)
-    -- the first two are None when flagged or unevaluated."""
+    -- both are None when flagged or unevaluated; model_net_apy alone can also be None on its
+    own when the pool's volatility is too extreme for expected_il_fraction to produce a valid
+    estimate (vol_ratio is unaffected either way -- see il_model.risk_adjusted_apy)."""
     try:
         info = market_data.fetch_investment_info(investment_id)
         stock, chain_id, quote_addr, pair_mode = market_data.resolve_pool_stock_and_quote({}, info, stock_index)

@@ -34,6 +34,7 @@ from bstocks_lp.il_model import (
     breakeven_volatility,
     expected_il_fraction,
     richness_grade,
+    risk_adjusted_apy,
     vol_richness_ratio,
 )
 from bstocks_lp.market_data import resolve_pool_stock_and_quote
@@ -104,17 +105,28 @@ def test_expected_il_fraction_scales_with_variance():
     assert expected_il_fraction(0.0) == 0.0
 
 
-def test_expected_il_fraction_capped_at_one_for_extreme_volatility():
-    # Real bug this locks in: the raw diffusion formula sigma^2/8 is only a small-sigma Taylor
-    # approximation and silently exceeds 1.0 past sigma = sqrt(8) ~= 283% annualized -- confirmed
-    # live on a real pool (a stock this volatile in practice, sigma ~310%) whose uncapped
-    # "expected IL" came out to ~120%, which is impossible under this model's own IL definition
-    # (true IL asymptotically approaches but never reaches 100%, even at pa->0, pb->infinity --
-    # see _il_at_price_ratio). 310% is not a synthetic edge case; it's what a real user saw.
-    assert expected_il_fraction(3.10) == 1.0
-    assert expected_il_fraction(5.0) == 1.0
-    # just under the sqrt(8) ~= 2.828 threshold, the formula is still below the cap and unaffected
+def test_expected_il_fraction_none_for_extreme_volatility():
+    # Real bug this locks in, round two. The raw diffusion formula sigma^2/8 is only a
+    # small-sigma Taylor approximation and silently exceeds 1.0 past sigma = sqrt(8) ~= 283%
+    # annualized -- confirmed live on a real pool (a stock this volatile in practice, sigma
+    # ~310%) whose uncapped "expected IL" came out to ~120%, which is impossible under this
+    # model's own IL definition (true IL asymptotically approaches but never reaches 100%, even
+    # at pa->0, pb->infinity -- see _il_at_price_ratio). A first fix clamped the result to 1.0 --
+    # rejected on review: past this threshold the formula hasn't just hit a ceiling, it has left
+    # the regime it was ever valid for, so *any* single number (1.0 included) is false precision.
+    # Returns None instead, so callers can say "N/A" rather than present a guess as an estimate.
+    assert expected_il_fraction(3.10) is None
+    assert expected_il_fraction(5.0) is None
+    # just under the sqrt(8) ~= 2.828 threshold, the formula is still below 1.0 and unaffected
     assert expected_il_fraction(2.8) == pytest.approx(2.8 ** 2 / 8)
+
+
+def test_risk_adjusted_apy_propagates_none_but_keeps_vol_ratio():
+    scored = risk_adjusted_apy(apy=3.70, sigma_annual=3.10)
+    assert scored["expected_il"] is None
+    assert scored["model_net_apy"] is None
+    # vol_ratio is a function of sigma/apy alone, not of the (unavailable) IL estimate
+    assert scored["vol_ratio"] is not None
     assert expected_il_fraction(2.8) < 1.0
 
 
@@ -293,6 +305,19 @@ def test_recommend_range_falls_back_when_nothing_meets_safety_floor():
     rows, best = recommend_range(pool_apy=0.1, sigma_annual=5.0, side="straddle")
     assert best is not None
     assert best in rows
+
+
+def test_recommend_range_never_recommends_the_unscoreable_full_range_row():
+    # Real issue this locks in: at sigma this high (> sqrt(8) ~= 283% annualized), the synthetic
+    # full-range row's model_net_apy is None (see expected_il_fraction) -- max() can't rank None
+    # against a number, and even if it could, "recommend the one we can't quantify" is wrong.
+    # The concentrated rows always fall back to the exact boundary IL (range_metrics), which
+    # stays valid at any volatility, so a real recommendation is always available.
+    rows, best = recommend_range(pool_apy=3.70, sigma_annual=3.10, side="straddle")
+    full_range_row = next(r for r in rows if r["pb"] is None)
+    assert full_range_row["model_net_apy"] is None  # still present in rows, just unscoreable
+    assert best["model_net_apy"] is not None
+    assert best is not full_range_row
 
 
 # ---- pool_risk_flags ----
