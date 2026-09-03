@@ -47,8 +47,8 @@ syntax to remember.
 ## The idea
 
 *Full derivation, with every formula traced to its implementing function:
-[MODEL.md](MODEL.md) (or [MODEL.pdf](MODEL.pdf) for a typeset copy). What
-follows here is the summary.*
+[MODEL.md](MODEL.md) (GitHub renders its math natively). What follows here
+is the summary.*
 
 LP fee/incentive APY is compensation for impermanent loss (IL), and IL scales
 with the volatility of the pooled asset. Stock-token pools make this easy to
@@ -665,6 +665,18 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (MODEL.pdf removed -- it was most of the install payload)
+
+Same "installing feels slow" complaint, a different cause: of the ~1.15MB
+of files this repo actually tracks in git, `MODEL.pdf` alone was 817KB
+(~71%) -- more than 5x the size of the entire `bstocks_lp/` package plus
+`riskscreen.py` combined (~140KB), for a rendered convenience copy the
+skill never reads at runtime. Removed from the tracked tree; `MODEL.md`
+(GitHub renders its `$...$`/`$$...$$` math natively) is the only copy
+now. This reverses part of an explicit prior request (generate and push
+the PDF) -- flagged as a real trade-off and confirmed before removing it,
+not assumed.
 
 ### Recently shipped (two more sequential-but-independent loops parallelized)
 
