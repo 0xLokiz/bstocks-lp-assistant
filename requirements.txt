@@ -1,3 +1,3 @@
-# riskscreen.py itself uses only the Python standard library -- nothing here is needed to
-# actually run the skill/CLI, only to run its test suite:
+# riskscreen.py and the bstocks_lp/ package it imports use only the Python standard library --
+# nothing here is needed to actually run the skill/CLI, only to run its test suite:
 pytest>=7.0

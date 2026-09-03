@@ -27,7 +27,8 @@ automatically. The simplest way to install this one is to just ask Claude:
 
 Claude will confirm before doing anything (same pattern as installing any
 other Binance skill, e.g. `query-token-info`), then clone this repo's
-`SKILL.md` + `riskscreen.py` into `~/.claude/skills/bstocks-lp-assistant/`.
+files -- `SKILL.md`, `riskscreen.py`, the `bstocks_lp/` package it imports,
+and `stablecoins.json` -- into `~/.claude/skills/bstocks-lp-assistant/`.
 
 Manual install works too, if you'd rather do it yourself:
 

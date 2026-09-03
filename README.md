@@ -324,6 +324,33 @@ colored by grade, for `scan`), not just a raw table — see `SKILL.md` →
 candidate range, the recommended ±50% range highlighted — see the skill in
 action inside a Claude session for the rendered version)*
 
+## Code layout
+
+`riskscreen.py` at the repo root is a 5-line launcher (`from bstocks_lp.cli
+import main`); the implementation lives in `bstocks_lp/`, layered so a new
+feature has an obvious place to go:
+
+| Module | Responsibility |
+|---|---|
+| `config.py` | Constants, the JSON output envelope, stablecoin-address config loading |
+| `api.py` | Low-level I/O: the HTTP client (`_get`) and the `baw` CLI subprocess wrapper |
+| `market_data.py` | Fetching/shaping market data -- stock tokens, klines, LP pool listings, positions |
+| `volatility.py` | Realized-volatility estimators (Yang-Zhang OHLC, close-to-close, relative) |
+| `il_model.py` | Breakeven volatility, the Richness Score (`vol_ratio`), diffusion-approximation IL |
+| `range_model.py` | Concentrated-range math: concentration multiplier, stay-in-range probability, `recommend_range` |
+| `risk_screen.py` | The pre-deposit risk & plausibility screen, independent of the yield model |
+| `scan.py` | `run_scan` -- the shared evaluation pipeline -- and the ENTER/WATCH/NO_TRADE/UNSCOREABLE verdict |
+| `cli.py` | The seven CLI commands, argument parsing, `rebalance-check`'s presentation helpers |
+
+Dependency direction is one-way (`config -> api -> market_data ->
+volatility -> {il_model, range_model} -> risk_screen -> scan -> cli`), and
+every cross-module call goes through the qualified module (`market_data.
+fetch_stock_tokens(...)`, never `from bstocks_lp.market_data import
+fetch_stock_tokens`) -- that convention is what keeps every function
+mockable by `monkeypatch.setattr(<module>, "<name>", fake)` in
+`test_riskscreen_integration.py`, not just the ones already mocked today.
+See MODEL.md for the model itself; this table is only the code map.
+
 ## Usage
 
 ```bash
@@ -611,6 +638,35 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (split riskscreen.py into a bstocks_lp/ package)
+
+Requested directly: put the architecture in order now, since more features
+are coming. `riskscreen.py` had grown to 2055 lines -- HTTP/subprocess I/O,
+volatility estimators, the IL/breakeven model, the range model, the
+pre-deposit screen, the scan pipeline, and all seven CLI commands, all in
+one file. Split into a layered `bstocks_lp/` package (see "Code layout"
+above) with `riskscreen.py` reduced to a 5-line launcher --
+`python riskscreen.py <command>` is unchanged, no install step added.
+
+The load-bearing constraint: `test_riskscreen_integration.py` mocks I/O
+via `monkeypatch.setattr(riskscreen, "baw", fake)`, which only works
+because every caller looks `baw` up in one shared module namespace at
+call time. Across separate files that breaks unless every cross-module
+call goes through the qualified module (`api.baw(...)`, never `from
+bstocks_lp.api import baw`) -- adopted as a blanket rule for every call in
+the package, not just the six names mocked today. Caught and fixed one
+real bug the split would otherwise have introduced silently: the
+stablecoin-config default path is `__file__`-relative, and moving that
+code into `bstocks_lp/config.py` would have pointed it one directory
+wrong (fails *closed* -- an empty stablecoin set -- with only a stderr
+warning, so no existing test would have caught it).
+
+Verified beyond the test suite: `ruff`/`mypy` clean across the new
+package, a direct check that the stablecoin config still loads
+(non-zero address count), and live `scan`/`recommend`/`range` runs
+against the real API/`baw` session confirming byte-for-byte the same
+output shape as before the refactor.
 
 ### Recently shipped (a standalone model paper — MODEL.md / MODEL.pdf)
 

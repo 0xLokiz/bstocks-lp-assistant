@@ -272,6 +272,32 @@ hook 会根据已实现波动率、日历/交易时段状态或订单流方向�
 *（图表：横轴 p_active，纵轴 model_net_apy，每个候选区间一个点，推荐的±50%区间
 高亮显示——在 Claude 会话里实际使用这个 skill 可以看到渲染出来的版本）*
 
+## 代码结构
+
+仓库根目录的 `riskscreen.py` 只是一个5行的启动器（`from bstocks_lp.cli
+import main`）；实际实现在 `bstocks_lp/` 包里，按层次拆分，新功能加在哪
+里一目了然：
+
+| 模块 | 职责 |
+|---|---|
+| `config.py` | 常量、JSON输出的统一信封格式、稳定币地址配置加载 |
+| `api.py` | 最底层I/O：HTTP客户端（`_get`）和 `baw` CLI子进程封装 |
+| `market_data.py` | 拉取和整理市场数据——股票代币、K线、LP池子列表、持仓 |
+| `volatility.py` | 已实现波动率估计器（Yang-Zhang OHLC、收盘价、相对波动率） |
+| `il_model.py` | 盈亏平衡波动率、Richness Score（`vol_ratio`）、扩散近似的IL |
+| `range_model.py` | 集中区间数学：集中度倍数、留在区间内的概率、`recommend_range` |
+| `risk_screen.py` | 存款前风险与合理性筛查，独立于收益模型 |
+| `scan.py` | `run_scan`——共用的评估流水线——以及ENTER/WATCH/NO_TRADE/UNSCOREABLE结论判定 |
+| `cli.py` | 七个CLI命令、参数解析、`rebalance-check`的展示层辅助函数 |
+
+依赖方向是单向的（`config -> api -> market_data -> volatility ->
+{il_model, range_model} -> risk_screen -> scan -> cli`），并且每一次跨模
+块调用都走限定名（`market_data.fetch_stock_tokens(...)`，而不是 `from
+bstocks_lp.market_data import fetch_stock_tokens`）——这个约定是
+`test_riskscreen_integration.py` 里 `monkeypatch.setattr(<模块>, "<名字
+>", fake)` 能打到每一个函数的关键，不只是现在已经被mock的那几个。模型
+本身见 MODEL.md；这张表只是代码地图。
+
 ## 使用方式
 
 ```bash
@@ -513,6 +539,30 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（把 riskscreen.py 拆成一个 bstocks_lp/ 包）
+
+用户直接提出的要求：既然以后还会陆续加功能，先把架构理顺。
+`riskscreen.py` 已经长到2055行——HTTP/子进程I/O、波动率估计器、
+IL/盈亏平衡模型、区间模型、存款前筛查、扫描流水线、外加全部七个CLI命
+令，全挤在一个文件里。现在拆成了分层的 `bstocks_lp/` 包（见上面"代码
+结构"），`riskscreen.py` 缩成一个5行的启动器——`python riskscreen.py
+<命令>` 的用法完全不变，也没多一道安装步骤。
+
+拆分时最要命的约束：`test_riskscreen_integration.py` 通过
+`monkeypatch.setattr(riskscreen, "baw", fake)` 来mock I/O，这之所以能
+生效，是因为所有调用方都是在调用时刻去同一个模块命名空间里查找 `baw`
+这个名字的。一旦拆到不同文件里，这个机制就会失效，除非每一次跨模块调
+用都走限定名（`api.baw(...)`，而不是 `from bstocks_lp.api import
+baw`）——这条规则被定成了整个包里所有调用的统一约定，不只是今天被mock
+的那六个名字。拆分过程中还顺带抓到并修好了一个本该会被悄悄引入的真实
+bug：稳定币配置的默认路径是相对 `__file__` 算的，如果原样搬进
+`bstocks_lp/config.py` 会算错一层目录（这种失败是"失败关闭"的——稳定
+币集合变成空的，只在stderr打一行警告——现有测试根本抓不住这种问题）。
+
+验证不止跑测试套件：新包整体过了 `ruff`/`mypy`；直接检查过稳定币配置
+还能正常加载（地址数量非零）；还拿真实的API/`baw`会话跑了
+`scan`/`recommend`/`range`，确认输出跟重构前逐字节一致。
 
 ### 最近完成的（独立的模型论文——MODEL.md / MODEL.pdf）
 
