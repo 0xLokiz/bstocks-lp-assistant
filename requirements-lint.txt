@@ -1,0 +1,8 @@
+# Lint/type-check/dependency-scan tooling for CI's separate `lint` job -- kept out of
+# requirements.txt on purpose, so anyone just running the test suite (pytest
+# test_riskscreen.py test_riskscreen_integration.py) doesn't pay for installing ruff/mypy/
+# pip-audit's dependency trees too (measured: ~19s extra on a fast connection, for tools the
+# tests themselves never touch).
+ruff>=0.16
+mypy>=1.10
+pip-audit>=2.7

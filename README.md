@@ -310,9 +310,9 @@ V4-hook-safety item this doesn't replace.
 ## Visualizing results
 
 When used through Claude, results are shown as a chart (safety-vs-yield
-scatter for `range`, a vol_ratio comparison for `scan`), not just a raw
-table — see `SKILL.md` → "Visualizing results". Example, from live NVDAB-USDT
-data:
+scatter for `range`; a vol_ratio-vs-apy bubble scatter, sized by TVL and
+colored by grade, for `scan`), not just a raw table — see `SKILL.md` →
+"Visualizing results". Example, from live NVDAB-USDT data:
 
 *(chart: p_active on the x-axis, model_net_apy on the y-axis, one point per
 candidate range, the recommended ±50% range highlighted — see the skill in
@@ -379,11 +379,16 @@ CI (`.github/workflows/test.yml`) runs both files plus `py_compile` on a
 `ubuntu-latest` **and** `windows-latest` matrix — the Windows leg is what
 actually exercises `baw()`'s Windows-specific `cmd.exe`-wrapping code path
 in CI, previously untested there entirely despite being the most
-security-sensitive branch in the file. A separate `lint` job runs `ruff`
-(see [`ruff.toml`](ruff.toml) for the deliberately-scoped rule selection
-and why), `mypy` (`check_untyped_defs`, see [`mypy.ini`](mypy.ini) — caught
-a real type inconsistency in `_get()` during setup), and `pip-audit`
-against `requirements.txt`. Live-data smoke tests for every command are
+security-sensitive branch in the file. A separate `lint` job installs
+[`requirements-lint.txt`](requirements-lint.txt) (kept out of
+`requirements.txt` on purpose — installing `ruff`/`mypy`/`pip-audit`'s
+dependency trees measurably slows down `pip install -r requirements.txt`,
+~19s extra on a fast connection, for tools the tests themselves never
+touch) and runs `ruff` (see [`ruff.toml`](ruff.toml) for the
+deliberately-scoped rule selection and why), `mypy`
+(`check_untyped_defs`, see [`mypy.ini`](mypy.ini) — caught a real type
+inconsistency in `_get()` during setup), and `pip-audit` against both
+requirements files. Live-data smoke tests for every command are
 documented in "Status" below.
 
 **Execution is intentionally out of scope for this script.** `rebalance-check`
@@ -600,6 +605,26 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (two bugs found by a user's own testing)
+
+- **Installing just to run the tests got noticeably slower** after
+  `ruff`/`mypy`/`pip-audit` were added to `requirements.txt` — measured
+  ~19s extra on a fast connection for tools the tests themselves never
+  touch. Split into `requirements.txt` (`pytest` only, ~3.4s to install)
+  and [`requirements-lint.txt`](requirements-lint.txt) (the lint-only
+  tools, installed by CI's separate `lint` job) — see "Testing" above.
+- **`scan`'s suggested chart was actively misleading.** The prior
+  guidance (a bar chart of raw `vol_ratio`, sorted ascending) produced
+  exactly the confusion a real user reported from their own screenshot:
+  the *worst* pools (highest `vol_ratio`, Cheap-graded) got the *longest*
+  bars, reading as "biggest = best" by default visual convention, when a
+  *lower* `vol_ratio` is what's actually good — and TVL/safety-tier were
+  buried in text labels, not shown visually at all. Replaced with a
+  prescriptive bubble-scatter spec in `SKILL.md` (`vol_ratio` x-axis,
+  `model_net_apy` y-axis, bubble size = TVL, color = grade, a reference
+  line at the `ENTER`/`WATCH` boundary) — see "Visualizing results" in
+  `SKILL.md`.
 
 ### Recently shipped (the ENTER/WATCH/NO_TRADE/UNSCOREABLE verdict system)
 

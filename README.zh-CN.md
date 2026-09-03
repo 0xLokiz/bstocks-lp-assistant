@@ -262,8 +262,9 @@ hook 会根据已实现波动率、日历/交易时段状态或订单流方向�
 ## 结果可视化
 
 在 Claude 里使用时，结果会以图表形式展示（`range` 是安全性-收益散点图，
-`scan` 是vol_ratio对比图），不只是一张原始表格——见 `SKILL.md` →
-"Visualizing results"。示例，来自真实的 NVDAB-USDT 数据：
+`scan` 是一个vol_ratio对比apy的气泡图，气泡大小按TVL、颜色按grade区
+分），不只是一张原始表格——见 `SKILL.md` → "Visualizing results"。示
+例，来自真实的 NVDAB-USDT 数据：
 
 *（图表：横轴 p_active，纵轴 model_net_apy，每个候选区间一个点，推荐的±50%区间
 高亮显示——在 Claude 会话里实际使用这个 skill 可以看到渲染出来的版本）*
@@ -323,10 +324,14 @@ PancakeSwap Infinity 的V4识别案例，这样这个bug就不会悄悄回归）
 `windows-latest` 的矩阵上跑这两个文件加 `py_compile`——Windows那一条腿
 才是真正跑到了 `baw()` 里那段Windows专属的 `cmd.exe` 包裹逻辑，之前这
 段代码在CI里完全没有覆盖，尽管它是这个文件里安全最敏感的一段分支。另
-外有一个独立的 `lint` job 跑 `ruff`（选择了哪些规则、为什么，见
-[`ruff.toml`](ruff.toml)）、`mypy`（`check_untyped_defs`，见
+外有一个独立的 `lint` job，装的是
+[`requirements-lint.txt`](requirements-lint.txt)（特意没放进
+`requirements.txt` 里——装 `ruff`/`mypy`/`pip-audit` 的依赖树会让
+`pip install -r requirements.txt` 明显变慢，网络快的情况下也要多花约
+19秒，而测试本身根本用不到这些工具），跑 `ruff`（选择了哪些规则、为什
+么，见 [`ruff.toml`](ruff.toml)）、`mypy`（`check_untyped_defs`，见
 [`mypy.ini`](mypy.ini)——搭建过程中就抓到了 `_get()` 里一个真实的类型
-不一致问题）、以及针对 `requirements.txt` 的 `pip-audit`。每个命令的
+不一致问题）、以及针对两个requirements文件的 `pip-audit`。每个命令的
 真实数据冒烟测试记录在下面的"运行状态"里。
 
 **执行环节故意不在这个脚本的范围内。** `rebalance-check` 只打印报告，不会
@@ -505,6 +510,24 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（用户自己测试发现的两个bug）
+
+- **光是为了跑测试而装依赖，也明显变慢了。** 把 `ruff`/`mypy`/`pip-audit`
+  加进 `requirements.txt` 之后，网络快的情况下光是安装就要多花约19秒，
+  而测试本身根本用不到这些工具。拆成了 `requirements.txt`（只有
+  `pytest`，装起来约3.4秒）和
+  [`requirements-lint.txt`](requirements-lint.txt)（只给CI的独立
+  `lint` job 用）——见上文"测试"。
+- **`scan` 建议画的图之前会误导人。** 之前的指引（对原始 `vol_ratio`
+  画一个升序排列的柱状图）正好复现了一个真实用户从自己截图里发现的困
+  惑：`vol_ratio` 最高（评级Cheap）的那些最差池子，柱子反而画得最
+  长——按默认的视觉习惯，这会读成"越长越好"，但实际上 `vol_ratio` *越
+  低*才是好的——TVL和安全等级也都被埋进了文字标签里，图上完全看不出
+  来。现在换成了 `SKILL.md` 里一个明确写死的气泡散点图规格
+  （`vol_ratio` 横轴、`model_net_apy` 纵轴、气泡大小=TVL、颜色=grade，
+  外加一条标在 `ENTER`/`WATCH` 分界线上的参考线）——见 `SKILL.md` 里的
+  "Visualizing results"。
 
 ### 最近完成的（ENTER/WATCH/NO_TRADE/UNSCOREABLE 结论体系）
 

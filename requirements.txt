@@ -1,6 +1,3 @@
-# riskscreen.py itself uses only the Python standard library.
-# This file is for running the test suite and CI's lint/type-check/dependency-scan jobs:
+# riskscreen.py itself uses only the Python standard library -- nothing here is needed to
+# actually run the skill/CLI, only to run its test suite:
 pytest>=7.0
-ruff>=0.16
-mypy>=1.10
-pip-audit>=2.7

@@ -249,9 +249,27 @@ house style):
   the candidate ranges, recommended point visually distinct (larger marker
   / accent color, gray for the rest) — the safety-vs-yield tradeoff the
   user is actually deciding between.
-- **`scan` output**: a bar/dot chart of the Richness Score across the top
-  pools (lower `vol_ratio` = better), colored by grade, so "which pool is
-  cheap" reads as a shape, not a column of decimals.
+- **`scan` output**: a scatter/bubble chart, not a plain bar chart —
+  `vol_ratio` on the x-axis, `model_net_apy` on the y-axis (higher =
+  better, so y-up already reads correctly), bubble size = `tvl` (bigger
+  bubble = more capital the pool can absorb before your deposit moves it),
+  color = grade/verdict (green for Rich/`ENTER`, amber for Fair/`WATCH`,
+  red for Cheap — never a single uniform color across every bubble).
+  Label the x-axis "vol_ratio (lower = richer/cheaper)" explicitly, and
+  add a vertical reference line at `vol_ratio = 1.0` marking the
+  `ENTER`/`WATCH` boundary. This framing matters because a bare bar chart
+  of raw `vol_ratio` is actively misleading, confirmed in practice (a real
+  user's own chart, not a hypothetical): sorted ascending with bars scaled
+  to `vol_ratio`, the *worst* pools (highest `vol_ratio`, Cheap-graded) get
+  the *longest* bars — reading as "biggest = best" by default visual
+  convention, when a lower `vol_ratio` is what's actually good. TVL and
+  safety-tier were invisible too (buried in a text label, not encoded
+  visually) — the bubble size/color above fix that same gap. If a bar/dot
+  chart is truly unavoidable (e.g. a widget that can't do bubble scatter),
+  sort so the best pool is first, color every bar by grade, and put the
+  `vol_ratio` value directly in each bar's label — never ship a monochrome
+  bar chart whose length alone implies "bigger is better" for a metric
+  where lower is what's good.
 
 Keep the numeric table in the response text too (some users want exact
 figures) — the chart supplements it, it doesn't replace it.
