@@ -389,9 +389,9 @@ an `as_of` UTC timestamp plus (on `scan`) `elapsed_seconds`, `flagged`, and
 stripping table text out of it first.
 
 **Testing**: `pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` runs 158 tests total. `test_riskscreen.py`
+test_riskscreen_integration.py` runs 160 tests total. `test_riskscreen.py`
 (132) covers pure-math/pure-logic functions with no I/O at all.
-`test_riskscreen_integration.py` (26) exercises `run_scan`/`cmd_*` end to
+`test_riskscreen_integration.py` (28) exercises `run_scan`/`cmd_*` end to
 end — including the exact evaluation pipeline, JSON output, and CLI
 argument parsing — by mocking only the two leaf I/O functions, `baw()` and
 `_get()`, with fake dispatchers keyed by call signature; every
@@ -500,6 +500,33 @@ same machine: `scan --top 5` (default 3-page sweep, ~39 candidate pools)
 **43.7s → 10.1s**; `recommend` (1-page default) **down to ~7s**. If a run
 still feels slow, `--max-pages` is the main lever — each extra page adds
 ~100 more candidate pools to fetch.
+
+Two more sequential-but-independent loops found the same way (profiling a
+real run, not guessing) and fixed the same way:
+
+- **Protocol security-score lookups** (`defi protocol-info`, one per
+  *distinct* protocol among the survivors) were fetched one at a time
+  inside `run_scan`'s scoring loop -- each its own `baw` subprocess spawn.
+  Measured directly: 4 distinct protocols took 2.91s fetched sequentially
+  vs the ~0.73s of the single slowest call once fetched concurrently
+  (same `ThreadPoolExecutor` pattern as the pool-info/kline fetches).
+  Paired before/after on the exact same code path
+  (`run_scan(max_pages=1, with_range=True)`): **9.37s → 7.10s**.
+- **Multi-page pool listing** (`fetch_lp_investments`) fetched page 2, 3,
+  ... one at a time in a `for` loop -- also independent, stateless calls
+  that don't need each other's result. Now page 1 alone determines
+  `pools_total`, then only the pages that could actually contain data
+  (`min(max_pages, ceil(pools_total / 100))`, never wastefully more) are
+  fetched concurrently. Measured: 3 pages / 300 pools in 1.39s (one
+  sequential page-1 call plus two pages fetched in parallel), vs. what
+  was 3 fully sequential subprocess spawns before.
+
+Both changes are pure internal reordering -- same data, same results,
+verified against the full test suite plus a live end-to-end run
+confirming identical output to before. If a run still feels slow,
+`--max-pages` is still the main lever — each extra page adds ~100 more
+candidate pools to fetch, and `MAX_CONCURRENT_BAW_CALLS` bounds how many
+of any of these fetches run at once.
 
 ## Status
 
@@ -638,6 +665,18 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (two more sequential-but-independent loops parallelized)
+
+Requested directly: installing and running felt slow. Profiled a real
+`recommend`-style run rather than guessing (39 `baw` calls, 9.37s) and
+found two more loops with the same shape as the concurrency fix already
+in "Performance" -- independent, stateless `baw` calls being fetched one
+at a time: `run_scan`'s per-protocol security-score lookups, and
+`fetch_lp_investments`'s page 2+ fetches. Both now use the same
+`ThreadPoolExecutor` pattern the pool-info/kline fetches already use.
+See "Performance" above for the measured before/after. 2 new tests
+(160 total, up from 158).
 
 ### Recently shipped (split riskscreen.py into a bstocks_lp/ package)
 

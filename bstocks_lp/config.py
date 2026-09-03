@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 
 DAYS_PER_YEAR = 365
 
+# Bounds parallel `baw`/kline fetches in market_data.fetch_lp_investments (multi-page) and
+# scan.run_scan (investment-info, klines, protocol-info) -- shared here rather than duplicated
+# per module, since market_data and scan both need it and neither may import the other.
+MAX_CONCURRENT_BAW_CALLS = 8
+
 SCHEMA_VERSION = "1.0"
 
 INTERVAL_TO_ANNUALIZATION = {

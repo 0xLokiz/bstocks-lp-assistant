@@ -3,6 +3,7 @@ the user's own DeFi positions. Everything here is a thin, cached-where-appropria
 `api.baw`/`api._get` -- no volatility/IL/risk math lives in this module.
 """
 
+import concurrent.futures
 import functools
 import json
 
@@ -52,28 +53,49 @@ def fetch_klines(chain_id, contract_address, interval="1d", limit=90):
     return body["data"]["klineInfos"]
 
 
+def _fetch_investment_list_page(page):
+    body = api.baw("defi", "investment-list", "--investType", "LiquidityPool", "--size", "100", "--page", str(page))
+    if not body.get("success"):
+        raise RuntimeError(json.dumps(body.get("error", body)))
+    return body["data"]
+
+
 def fetch_lp_investments(max_pages=3):
     """Page through `defi investment-list` (max 100/page per the API) instead of reading only
     the first page. Sorted by apy DESC (the API default), so later pages surface lower-apy --
     but not necessarily lower risk-adjusted -- pools that a single 100-pool page would never
-    reach. Stops early once a page comes back short (no more results) or `max_pages` is hit.
+    reach.
 
-    Returns (pools, pools_total): `pools_total` is the API's own count of every LiquidityPool
-    investment system-wide (the `total` field, present on every page), independent of how many
-    pages were actually fetched. Without this, `len(pools) < max_pages * 100` was the only way
-    to even suspect a scan was cut short -- a real gap: answering "did this cover every pool?"
-    took a live manual investigation before pools_total existed. Callers compare it against
-    len(pools) to tell a genuinely-complete scan apart from one `max_pages` truncated.
+    Page 1 is fetched alone first, since it's the only way to learn `pools_total` (the API's own
+    count of every LiquidityPool investment system-wide, present on every page). Once known, the
+    remaining pages actually needed -- min(max_pages, ceil(pools_total / 100)), never more than
+    that, so a small pools_total doesn't waste calls on pages that don't exist -- are fetched
+    concurrently: each page is a separate `baw` subprocess spawn (~0.6s+ of pure startup overhead
+    each, independent of network latency), and fetching them one at a time was pure sequential
+    wait for calls that don't depend on each other, same as run_scan's Pass 1/Pass 2 fetches.
+
+    Returns (pools, pools_total). Without pools_total, `len(pools) < max_pages * 100` was the
+    only way to even suspect a scan was cut short -- a real gap: answering "did this cover every
+    pool?" took a live manual investigation before pools_total existed. Callers compare it
+    against len(pools) to tell a genuinely-complete scan apart from one `max_pages` truncated.
     """
+    page1 = _fetch_investment_list_page(1)
+    pools_by_page = {1: page1["list"]}
+    pools_total = page1.get("total", 0)
+
+    if len(pools_by_page[1]) == 100 and max_pages > 1:
+        needed_pages = min(max_pages, -(-pools_total // 100))  # ceil(pools_total / 100)
+        remaining = range(2, needed_pages + 1)
+        if remaining:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as executor:
+                future_to_page = {executor.submit(_fetch_investment_list_page, page): page for page in remaining}
+                for future in concurrent.futures.as_completed(future_to_page):
+                    page = future_to_page[future]
+                    pools_by_page[page] = future.result()["list"]
+
     all_pools = []
-    pools_total = 0
-    for page in range(1, max_pages + 1):
-        body = api.baw("defi", "investment-list", "--investType", "LiquidityPool", "--size", "100", "--page", str(page))
-        if not body.get("success"):
-            raise RuntimeError(json.dumps(body.get("error", body)))
-        data = body["data"]
-        page_list = data["list"]
-        pools_total = data.get("total", pools_total)
+    for page in sorted(pools_by_page):
+        page_list = pools_by_page[page]
         all_pools.extend(page_list)
         if len(page_list) < 100:
             break

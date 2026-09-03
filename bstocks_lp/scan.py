@@ -10,9 +10,14 @@ import sys
 import urllib.error
 from collections import Counter
 
-from bstocks_lp import il_model, market_data, range_model, risk_screen, volatility
-
-MAX_CONCURRENT_BAW_CALLS = 8  # bounds parallel `baw`/kline fetches -- see run_scan's Pass 1
+from bstocks_lp import (
+    config,
+    il_model,
+    market_data,
+    range_model,
+    risk_screen,
+    volatility,
+)
 
 POOL_SHARE_WARNING_THRESHOLD = 0.20  # warn if an intended deposit would exceed this share of pool TVL
 
@@ -158,7 +163,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
     # concurrently instead; MAX_CONCURRENT_BAW_CALLS bounds how hard that hits the API.
     info_by_pool = {}
     info_fetch_errors = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as pool_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as pool_executor:
         future_to_pool = {pool_executor.submit(market_data.fetch_investment_info, p["investmentId"]): p
                            for p in candidates}
         for future in concurrent.futures.as_completed(future_to_pool):
@@ -198,7 +203,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
     # for the same reason -- network round-trip latency, not local CPU, dominates.
     kline_cache = {}
     kline_fetch_errors = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BAW_CALLS) as kline_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as kline_executor:
         future_to_key = {
             kline_executor.submit(market_data.fetch_klines, chain_id, addr, limit=91): (chain_id, addr)
             for chain_id, addr in kline_keys
@@ -271,13 +276,33 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
     for p in prepared:
         entries_by_ticker.setdefault(p["stock"]["ticker"], []).append((p["pool"]["investmentId"], p["apy"]))
 
+    # Protocol security scores are looked up once per *distinct* protocol (fetch_protocol_security_score's
+    # own cache already dedupes that), but fetching them one at a time inside this loop -- each a
+    # separate baw subprocess spawn, the same ~0.6s+ overhead Pass 1 already pays concurrently for
+    # -- turned into real sequential wait: 4 distinct protocols measured at ~2.9s fetched serially,
+    # vs ~0.7s (the slowest single call) fetched concurrently. Same fix as Pass 1: resolve every
+    # distinct protocol's score up front via a thread pool, then the scoring loop below is a pure
+    # cache lookup, no I/O.
+    distinct_protocol_ids = {pid for pid in
+                              (p["pool"].get("defiProtocolId") or p["info"].get("defiProtocolId") for p in prepared)
+                              if pid}
     security_score_cache: dict[str, float | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as score_executor:
+        future_to_pid = {score_executor.submit(market_data.fetch_protocol_security_score, pid, {}): pid
+                          for pid in distinct_protocol_ids}
+        for future in concurrent.futures.as_completed(future_to_pid):
+            pid = future_to_pid[future]
+            try:
+                security_score_cache[pid] = future.result()
+            except Exception:
+                security_score_cache[pid] = None
+
     results = []
     flagged = []
     for p in prepared:
         pool, info, stock, sigma, apy = p["pool"], p["info"], p["stock"], p["sigma"], p["apy"]
         protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
-        security_score = market_data.fetch_protocol_security_score(protocol_id, security_score_cache) if protocol_id else None
+        security_score = security_score_cache.get(protocol_id) if protocol_id else None
         peer_apys = [a for inv_id, a in entries_by_ticker.get(stock["ticker"], []) if inv_id != pool["investmentId"]]
         evaluation = risk_screen.evaluate_pool(
             pool, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,

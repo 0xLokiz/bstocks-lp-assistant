@@ -333,9 +333,9 @@ auth signin` / `baw auth verify`）。`stocks`、`vol`、`range --ticker/--apy`
 喂给 `jq` 或调度器，不用先把表格文字剥掉。
 
 **测试**：`pip install -r requirements.txt && pytest test_riskscreen.py
-test_riskscreen_integration.py` 总共跑158个测试。`test_riskscreen.py`
+test_riskscreen_integration.py` 总共跑160个测试。`test_riskscreen.py`
 （132个）覆盖纯数学/纯逻辑函数，完全不涉及I/O。
-`test_riskscreen_integration.py`（26个）端到端地跑
+`test_riskscreen_integration.py`（28个）端到端地跑
 `run_scan`/`cmd_*`——包括真实的评估流水线、JSON输出、CLI参数解析——只
 mock了两个最底层的I/O函数 `baw()` 和 `_get()`，用按调用签名分发的假实
 现；中间的每一个 `fetch_*`/`resolve_*`/`evaluate_*` 函数都是真的在跑。
@@ -426,6 +426,27 @@ preview` → 跟用户确认 → `defi deposit` / `defi lp-add` / `defi redeem` 
 39个候选池）**43.7秒 → 10.1秒**；`recommend`（默认1页）**降到约7秒**。如
 果还是觉得慢，`--max-pages` 是最主要的杠杆——每多扫一页大概多拉100个候选
 池。
+
+用同样的方法（对真实调用做profiling，不是靠猜）又抓到并修好了两处"本
+来互相独立、却串行执行"的循环：
+
+- **协议安全评分查询**（`defi protocol-info`，每个不同的协议查一次）之
+  前是在 `run_scan` 打分那个循环里一个个查的——每次都是单独一次 `baw`
+  子进程。实测：4个不同协议串行查要2.91秒，改成并发后（跟池子信
+  息/K线用同一套 `ThreadPoolExecutor`）只要最慢那一次的约0.73秒。在完
+  全相同的代码路径上做了修复前后的配对对比
+  （`run_scan(max_pages=1, with_range=True)`）：**9.37秒 → 7.10秒**。
+- **分页拉取池子列表**（`fetch_lp_investments`）之前是在一个 `for` 循环
+  里一页页顺序拉的——这些调用同样互相独立，不需要等对方的结果。现在只
+  用第1页就能拿到 `pools_total`，然后只并发拉真正可能有数据的那些页
+  （`min(max_pages, ceil(pools_total / 100))`，绝不多拉不存在的页）。实
+  测：3页、300个池子，1.39秒拉完（第1页顺序 + 后两页并发），而以前是3
+  次完全顺序的子进程调用。
+
+这两处改动都是纯粹的内部执行顺序调整——数据和结果都没变，跑过完整测试
+套件，也拿真实数据端到端跑过一遍确认输出跟改动前一致。如果还是觉得
+慢，`--max-pages` 依然是最主要的杠杆——每多扫一页大概多拉100个候选
+池，`MAX_CONCURRENT_BAW_CALLS` 则控制这些抓取里同时跑几个。
 
 ## 运行状态
 
@@ -539,6 +560,16 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（又并发化了两处本来互相独立却串行执行的循环）
+
+用户直接提出的要求：安装和运行都感觉慢。没有靠猜，而是对一次真实的
+`recommend` 式调用做了profiling（39次 `baw` 调用，9.37秒），发现还有两
+处循环跟"性能"一节里已经修过的并发问题是同一个模式——互相独立、无状态
+的 `baw` 调用却在一个个顺序执行：`run_scan` 里按协议查安全评分的循环，
+以及 `fetch_lp_investments` 拉第2页及之后的循环。现在都用上了跟池子信
+息/K线抓取一样的 `ThreadPoolExecutor` 模式。实测的修复前后对比见上面
+"性能"一节。新增2个测试（共160个，此前158个）。
 
 ### 最近完成的（把 riskscreen.py 拆成一个 bstocks_lp/ 包）
 

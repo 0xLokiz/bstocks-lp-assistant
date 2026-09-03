@@ -42,6 +42,7 @@ class FakeBaw:
 
     def __init__(self):
         self.investment_list_page1 = []
+        self.investment_list_extra_pages: dict = {}  # page number (2+) -> pool list, default empty
         self.investment_list_total = None  # None -> defaults to len(page1), i.e. not truncated
         self.investment_info = {}       # investmentId -> info dict
         self.protocol_security_score = {}  # defiProtocolId -> score
@@ -52,8 +53,8 @@ class FakeBaw:
         self.calls.append(args)
         head = args[0] if args else None
         if head == "defi" and args[1] == "investment-list":
-            page = args[args.index("--page") + 1]
-            pools = self.investment_list_page1 if page == "1" else []
+            page = int(args[args.index("--page") + 1])
+            pools = self.investment_list_page1 if page == 1 else self.investment_list_extra_pages.get(page, [])
             total = (self.investment_list_total if self.investment_list_total is not None
                      else len(self.investment_list_page1))
             return {"success": True, "data": {"list": pools, "total": total}}
@@ -308,6 +309,51 @@ def test_run_scan_coverage_reports_complete_when_last_page_is_short(fake_io):
     results, flagged, unscoreable, coverage = scan.run_scan(max_pages=3)
 
     assert coverage == {"pools_fetched": 1, "pools_total": 1, "truncated": False}
+
+
+# ---- fetch_lp_investments: concurrent multi-page fetch ----
+
+def test_fetch_lp_investments_fetches_additional_pages_concurrently_when_page_one_is_full(fake_io):
+    # Real perf fix this locks in: page 2+ used to be fetched one at a time inside a `for page in
+    # range(...)` loop -- each a separate `baw` subprocess spawn, pure sequential wait for calls
+    # that don't depend on each other. Now page 1 alone determines pools_total, then only the
+    # pages that could actually exist (capped by both max_pages and ceil(pools_total/100)) are
+    # fetched concurrently.
+    fb, fg = fake_io
+    fb.investment_list_page1 = [pool_entry(f"inv{i}", f"P{i}-USDT", "PancakeSwap V3", "pancakeswap3")
+                                 for i in range(100)]
+    fb.investment_list_extra_pages = {
+        2: [pool_entry(f"inv2_{i}", f"Q{i}-USDT", "PancakeSwap V3", "pancakeswap3") for i in range(50)],
+        3: [pool_entry("inv3_should_not_be_fetched", "R-USDT", "PancakeSwap V3", "pancakeswap3")],
+    }
+    fb.investment_list_total = 150  # only 2 pages' worth actually exist -- page 3 must not be requested
+
+    pools, total = market_data.fetch_lp_investments(max_pages=5)
+
+    assert total == 150
+    assert len(pools) == 150  # page 1 (100) + page 2 (50)
+    page_requests = [c for c in fb.calls if c[0] == "defi" and c[1] == "investment-list"]
+    pages_requested = {c[c.index("--page") + 1] for c in page_requests}
+    assert pages_requested == {"1", "2"}  # capped at ceil(150/100)=2 -- page 3 never requested
+
+
+def test_fetch_lp_investments_stops_at_max_pages_even_when_more_exist(fake_io):
+    fb, fg = fake_io
+    fb.investment_list_page1 = [pool_entry(f"inv{i}", f"P{i}-USDT", "PancakeSwap V3", "pancakeswap3")
+                                 for i in range(100)]
+    fb.investment_list_extra_pages = {
+        2: [pool_entry(f"inv2_{i}", f"Q{i}-USDT", "PancakeSwap V3", "pancakeswap3") for i in range(100)],
+        3: [pool_entry("inv3_should_not_be_fetched", "R-USDT", "PancakeSwap V3", "pancakeswap3")],
+    }
+    fb.investment_list_total = 300  # 3 pages exist, but max_pages=2 caps the fetch
+
+    pools, total = market_data.fetch_lp_investments(max_pages=2)
+
+    assert total == 300
+    assert len(pools) == 200
+    page_requests = [c for c in fb.calls if c[0] == "defi" and c[1] == "investment-list"]
+    pages_requested = {c[c.index("--page") + 1] for c in page_requests}
+    assert pages_requested == {"1", "2"}
 
 
 # ---- malformed / missing / type-drifted API responses ----
