@@ -46,6 +46,10 @@ syntax to remember.
 
 ## The idea
 
+*Full derivation, with every formula traced to its implementing function:
+[MODEL.md](MODEL.md) (or [MODEL.pdf](MODEL.pdf) for a typeset copy). What
+follows here is the summary.*
+
 LP fee/incentive APY is compensation for impermanent loss (IL), and IL scales
 with the volatility of the pooled asset. Stock-token pools make this easy to
 model cleanly: they're paired against a stablecoin, so IL is driven almost
@@ -107,7 +111,9 @@ concentration multiplier `M = 1 / (1 - √(Pa/Pb))`.
 
 - **Straddling range** (`Pa < 1 < Pb`, the default): ordinary
   market-making. `p_active` = probability of never exiting the range over
-  the period (a conservative union-bound approximation).
+  the period, via the exact double-barrier reflection-series formula (see
+  MODEL.md §6.2) -- a conservative union-bound approximation is kept only
+  as a fallback for degenerate inputs.
 - **Single-sided range** (`Pa ≥ 1` or `Pb ≤ 1`): a **yield-enhanced limit
   order** — a sell-side range only converts toward the stable asset (and
   earns fees) once price rises into it; a buy-side range, once price falls
@@ -605,6 +611,22 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (a standalone model paper — MODEL.md / MODEL.pdf)
+
+The README's "The idea" section was always a summary; a user asked for the
+full mathematical derivation in standard paper format, so it now exists
+as its own document: [MODEL.md](MODEL.md) (Abstract through a numbered
+§1-10, every formula traced to the `riskscreen.py` function that
+implements it -- checked line-by-line against the actual code, not
+written from memory) plus a typeset [MODEL.pdf](MODEL.pdf) rendered from
+the same source. Caught and fixed one real drift in the process: this
+README's own "The idea" section still described the straddling-range
+`p_active` as "a conservative union-bound approximation" -- stale since
+that was upgraded to the exact double-barrier reflection-series formula
+several rounds ago (the union-bound is now only a degenerate-input
+fallback); `README.zh-CN.md` already had this right, so the two READMEs
+had quietly drifted apart on this one point until this pass caught it.
 
 ### Recently shipped (a third round on chart legibility — the labels still overlapped)
 
