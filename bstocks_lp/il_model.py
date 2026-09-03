@@ -87,11 +87,18 @@ def _il_at_price_ratio(k):
 # `model_net_apy` is this tool's own estimate (platform apy minus modeled IL), not a promised
 # or historical return. Checked directly against `defi investment-info`'s response shape (see
 # README): the platform's `apy`/`apyBps` is a single blended figure with no fee-vs-incentive
-# split, no as-of timestamp, and no lockup/redemption/incentive-expiry data available through
-# this API on any pool sampled -- so this is a documented data-availability limit, not an
-# oversight. An incentive-heavy apy can look attractive right up until the incentive program
-# ends, with nothing in this tool able to see that coming.
+# split, no as-of timestamp, no trading-volume figure, and no lockup/redemption/incentive-expiry
+# data available through this API on any pool sampled -- so this is a documented
+# data-availability limit, not an oversight. Without a volume figure or a time window, this tool
+# has no way to tell a durable fee rate apart from one a single large trade or a brief volume
+# spike happened to produce right before this snapshot was taken -- confirmed live: the same
+# pool's TVL and apy both swung sharply (TVL nearly halved, apy roughly tripled) between two
+# checks minutes apart, consistent with the same fee revenue landing on much less liquidity, not
+# necessarily a durable change. An incentive-heavy apy can also look attractive right up until
+# the incentive program ends, with nothing in this tool able to see either coming.
 MODEL_APY_CAVEAT = ("model_net_apy is a model estimate (platform apy minus modeled IL), not a "
                      "promised or historical return. The platform apy itself is a single blended "
-                     "fee+incentive figure -- no breakdown, timestamp, or lockup/expiry data is "
-                     "available from the API, so an incentive-heavy apy can collapse with no warning.")
+                     "fee+incentive figure with no breakdown, timestamp, trading-volume figure, or "
+                     "lockup/expiry data available from the API -- it can swing sharply on a TVL "
+                     "change, a single large trade, or an incentive program starting/ending, with "
+                     "no way from this data alone to tell a durable rate from a transient spike.")

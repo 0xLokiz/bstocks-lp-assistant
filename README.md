@@ -670,6 +670,20 @@ already built.
   store is most of what a paper-trading harness would need to replay
   against anyway).
 
+### Recently shipped (MODEL_APY_CAVEAT: volume/TVL noise, not just incentives)
+
+Follow-up to the IL-cap fix below, from the same question ("why is this
+pool's apy so different from before"): checked the actual `defi
+investment-info` response live -- it carries no trading-volume figure and
+no as-of timestamp at all, only a pre-blended `apy`/`apyBps`. That means
+this tool has no way to tell a durable fee rate apart from one a single
+large trade or a brief volume spike happened to produce right before the
+snapshot -- a distinct risk from the incentive-program-ending risk the
+caveat already named. `MODEL_APY_CAVEAT` and MODEL.md's limitations list
+now say so explicitly, illustrated with the real numbers that prompted
+the question (same pool, TVL nearly halved and apy roughly tripled
+between two checks minutes apart).
+
 ### Recently shipped (expected_il_fraction could exceed 100% -- a real math bug)
 
 Found by a user asking "why is this pool's net APY so different from before" --

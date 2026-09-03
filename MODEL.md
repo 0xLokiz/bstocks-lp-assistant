@@ -178,7 +178,7 @@ The `ENTER` bar (`passes_trade_gate()`) is deliberately a conjunction, not eithe
 
 These are documented in-code (`MODEL_APY_CAVEAT` and surrounding comments) and repeated here deliberately, because presenting `model_net_apy` without them overstates the model's certainty:
 
-- **`apy` itself is a single blended fee+incentive figure.** The API exposes no breakdown, as-of timestamp, or lockup/incentive-expiry data on any pool sampled — an incentive-heavy `apy` can collapse with no warning this tool is positioned to see coming.
+- **`apy` itself is a single blended fee+incentive figure.** The API exposes no breakdown, as-of timestamp, trading-volume figure, or lockup/incentive-expiry data on any pool sampled — there is no way from this data alone to tell a durable fee rate apart from one a single large trade or a brief volume spike happened to produce right before the snapshot, and an incentive-heavy `apy` can collapse with no warning either. Confirmed live, not hypothetical: the same pool's TVL and `apy` both swung sharply (TVL nearly halved, `apy` roughly tripled) between two checks minutes apart.
 - **Driftless lognormal diffusion is a simplification.** Real prices drift and can jump (earnings, corporate actions); the diffusion approximation and the double-barrier probability both assume driftless geometric Brownian motion.
 - **The `apy` used as a range's baseline is the platform's blended, full-range-equivalent figure**, scaled by $M$ — not a true per-tick fee rate, because the API does not expose one.
 - **Single-sided range IL still reuses the straddling IL-vs-hold formula** as a cost proxy, not a model of actual execution price versus a plain limit order at the boundary — a known, explicitly scoped-out refinement (see `README.md` roadmap).
