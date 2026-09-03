@@ -718,6 +718,29 @@ already built.
   store is most of what a paper-trading harness would need to replay
   against anyway).
 
+### Recently shipped (recommend's headline and table quietly disagreed on net APY)
+
+Found by directly checking `cli.py` after being asked to verify it, not the
+other way around -- a separate Claude Code session, running this skill
+independently, reported GME's yield as "5.96%" against a peer at "3.08%",
+numbers that didn't match anything this session had computed. Traced it:
+`cmd_recommend`'s headline sentence quoted `best_range.model_net_apy` (the
+concentrated-range figure, e.g. 845.3% for one live GMEB-USDT pool) while
+the ranked table directly below it, and the `$/yr` capital estimate below
+that, both used the plain full-range `model_net_apy` for the *same* pool
+(593.97% for that pool at the same moment) -- two real, correctly-computed
+numbers, but nothing in the output said which was which or that they'd
+differ, so a reader had no way to tell that apart from a bug or a
+contradiction. (The other session's "5.96%"/"3.08%" turn out to be almost
+exactly the full-range numbers divided by 100 again -- a downstream unit
+slip in that session's own separate code, not this tool's, but the root
+ambiguity this tool shipped is what set it up.) Fixed in both
+`cmd_recommend` and `scan --with-range --capital`: the table and the
+dollar estimate now use each row's own `best_range.model_net_apy` --
+the same figure already quoted in the headline -- instead of silently
+falling back to the full-range one. Two new regression tests lock in that
+the headline, table, and dollar figure agree for the same pool.
+
 ### Recently shipped (peer-outlier check needs enough peers, or it flags a clean pool)
 
 Found and fixed live, from a user pushing back on a flagged pool: "why do

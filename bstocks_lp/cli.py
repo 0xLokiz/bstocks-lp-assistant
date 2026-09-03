@@ -127,7 +127,14 @@ def cmd_scan(args):
     capital_note = None
     if args.capital and results:
         top = results[0]
-        capital_note = scan.position_sizing_note(args.capital, top["tvl"], top["model_net_apy"])
+        # Use the same net_apy the --with-range table shows for this row (best_range, the
+        # concentrated-range figure) rather than the plain full-range model_net_apy -- otherwise
+        # the $/yr estimate silently uses a different, smaller number than the range-net column
+        # printed right above it for the identical pool. See cmd_recommend for the same fix and
+        # the live case that surfaced it (a table row reading 593.97% under a range-net column
+        # showing 845.3% for that pool, with nothing explaining the two didn't match).
+        top_net_apy = top["best_range"]["model_net_apy"] if args.with_range else top["model_net_apy"]
+        capital_note = scan.position_sizing_note(args.capital, top["tvl"], top_net_apy)
 
     if args.json:
         # Pure JSON on stdout -- nothing else -- so a scheduler/pipeline can parse it directly.
@@ -415,16 +422,24 @@ def cmd_recommend(args):
     print(f"{scan.VERDICT_ENTER}: {top['pool']} ({top['stock_ticker']}) -- {top['grade']}, "
           f"{width} range at {b['confidence']} confidence, {b['model_net_apy']*100:.1f}% net APY.{pair_note}\n")
 
-    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'net_apy':>10}{'tvl':>14}  verdict")
+    # The table below and the $/yr estimate use each row's own best_range.model_net_apy, the
+    # same concentrated-range figure quoted in the headline above -- not the plain (full-range)
+    # model_net_apy. Confirmed live as a real source of confusion, not just a style nit: for one
+    # pool this printed "845.3% net APY" in the headline immediately above a table showing
+    # "593.97%" for that identical row, with nothing distinguishing the two numbers -- a reader
+    # (human or another agent) has no way to tell those are different metrics (concentrated-range
+    # vs full-range baseline) rather than a contradiction or a bug.
+    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'range_apy':>11}{'tvl':>14}  verdict")
     for r in results[:3]:
-        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{r['model_net_apy']*100:>9.2f}%{r['tvl']:>14,.0f}  {r['verdict']}")
+        rb = r["best_range"]
+        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{rb['model_net_apy']*100:>10.2f}%{r['tvl']:>14,.0f}  {r['verdict']}")
 
     if watch_list:
         print(f"\n{len(watch_list)} more pool(s) are {scan.VERDICT_WATCH} -- safe, but don't currently clear the "
               f"trade gate (see `scan --with-range` for the full list).")
 
     if args.capital:
-        note = scan.position_sizing_note(args.capital, top["tvl"], top["model_net_apy"])
+        note = scan.position_sizing_note(args.capital, top["tvl"], b["model_net_apy"])
         print(f"\nAt ${args.capital:,.0f}: ~${note['dollar_return']:,.0f}/yr, "
               f"~{note['share_pct']*100:.1f}% of {top['pool']}'s TVL.")
         if note["warning"]:

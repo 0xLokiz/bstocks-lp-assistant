@@ -687,6 +687,51 @@ def test_recommend_does_not_mask_position_fetch_failure_as_no_positions(monkeypa
     assert "No current bStock LP positions" not in out
 
 
+def test_recommend_table_and_capital_estimate_use_the_same_net_apy_as_the_headline(monkeypatch, capsys):
+    # Real bug, confirmed live: the headline sentence quoted best_range.model_net_apy (845.3%)
+    # for a pool while the table right below it and the $/yr estimate both used the plain
+    # (full-range) model_net_apy (593.97%) for that identical row -- same pool, two different
+    # numbers, nothing distinguishing them. Locks in that all three now agree.
+    top_result = {
+        "pool": "GMEB-USDT", "stock_ticker": "GME", "investmentId": "inv1",
+        "grade": "Rich", "model_net_apy": 0.30, "vol_ratio": 0.06, "tvl": 250000,
+        "pair_mode": "stablecoin", "verdict": scan.VERDICT_ENTER,
+        "best_range": {"pb": 1.5, "confidence": "Moderate", "model_net_apy": 0.845},
+    }
+    monkeypatch.setattr(scan, "run_scan", lambda **kw: ([top_result], [], [], FAKE_FULL_COVERAGE))
+    monkeypatch.setattr(market_data, "fetch_positions", lambda: {"success": True, "data": {"list": []}})
+
+    args = cli.build_parser().parse_args(["recommend", "--capital", "10000"])
+    cli.cmd_recommend(args)
+
+    out = capsys.readouterr().out
+    assert "84.5% net APY" in out          # headline: best_range's number
+    assert "84.50%" in out                 # table: same number, not 30.00%
+    assert "30.00%" not in out             # the full-range number must not leak into either
+    assert "$8,450/yr" in out              # capital estimate: 10000 * 0.845, not 10000 * 0.30
+
+
+def test_scan_with_range_capital_estimate_uses_range_net_not_full_range(monkeypatch, capsys):
+    # Same class of bug as cmd_recommend above, in `scan --with-range --capital`: the table's
+    # range-net column is per-row best_range.model_net_apy, so the $/yr estimate below it must
+    # use the same number for the top pick, not the plain full-range model_net_apy.
+    top_result = {
+        "pool": "GMEB-USDT", "stock_ticker": "GME", "investmentId": "inv1", "protocol": "PancakeSwap V3",
+        "grade": "Rich", "model_net_apy": 0.30, "apy": 0.35, "sigma_annual": 0.4, "vol_ratio": 0.06,
+        "tvl": 250000, "pair_mode": "stablecoin", "verdict": scan.VERDICT_ENTER,
+        "best_range": {"pb": 1.5, "confidence": "Moderate", "model_net_apy": 0.845},
+    }
+    monkeypatch.setattr(scan, "run_scan", lambda **kw: ([top_result], [], [], FAKE_FULL_COVERAGE))
+
+    args = cli.build_parser().parse_args(["scan", "--with-range", "--capital", "10000"])
+    cli.cmd_scan(args)
+
+    out = capsys.readouterr().out
+    assert "84.50%" in out                 # range-net column: best_range's number
+    assert "$8,450/yr" in out              # capital estimate must match, not $3,000/yr (30%)
+    assert "$3,000/yr" not in out
+
+
 # ---- rebalance-check: multi-investmentId worst-case, best_alternative + switching ----
 
 def test_rebalance_check_evaluates_every_investment_id_worst_case(monkeypatch, capsys):
