@@ -101,9 +101,21 @@ def _il_at_price_ratio(k):
 # checks minutes apart, consistent with the same fee revenue landing on much less liquidity, not
 # necessarily a durable change. An incentive-heavy apy can also look attractive right up until
 # the incentive program ends, with nothing in this tool able to see either coming.
+#
+# Independent corroboration, not just our own inference: Fables (fables.fi/docs), a live
+# Uniswap-v4-hook exchange, documents its own headline "Pool swap APR" the exact same way this
+# tool suspected -- the latest complete 24-hour fee window annualized against current pool TVL
+# (fables.fi/docs/methodology) -- and its own APR page states plainly that this figure is not a
+# forecast of future results and does not net out the value difference from simply holding the
+# original assets (fables.fi/docs/apr, fables.fi/docs/price-moves). That second point is exactly
+# why model_net_apy exists here: it already subtracts modeled IL from the raw platform apy, which
+# a bare platform-reported apy figure (Fables' or otherwise) does not do on its own -- but the
+# subtraction is still a model, not a settled result, so the same caveat applies to it too.
 MODEL_APY_CAVEAT = ("model_net_apy is a model estimate (platform apy minus modeled IL), not a "
                      "promised or historical return. The platform apy itself is a single blended "
                      "fee+incentive figure with no breakdown, timestamp, trading-volume figure, or "
                      "lockup/expiry data available from the API -- it can swing sharply on a TVL "
                      "change, a single large trade, or an incentive program starting/ending, with "
-                     "no way from this data alone to tell a durable rate from a transient spike.")
+                     "no way from this data alone to tell a durable rate from a transient spike "
+                     "(an unrelated live protocol, Fables, documents annualizing the same way and "
+                     "warns its own APR figure isn't a forecast -- see fables.fi/docs/apr).")

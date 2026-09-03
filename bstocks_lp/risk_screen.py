@@ -49,12 +49,19 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
       - feeRate outside a sane per-swap range (catches the exact QQQB-USDC V4 case: a
         feeRate of 838.86%/swap produced apy=1658.77% vs 77.86% on the equivalent V3 pool).
         NOTE ON CAUSE: an extreme snapshot doesn't necessarily mean the pool is broken or
-        malicious -- legitimate V4 protocols (e.g. Fables' "intelligent fees") run hooks that
-        reprice the swap fee per-transaction from realized volatility, session/calendar state,
-        or order flow direction, bounded and keeper-driven. A single feeRate read is then a
-        live, momentary number, not a stable rate -- annualizing it as if it were static (which
-        is what produces `apy`) is structurally wrong regardless of whether the hook itself is
-        legitimate. Flag it as "not a static rate we can annualize," not as "probably malicious."
+        malicious -- legitimate V4 protocols run hooks that reprice the swap fee per-transaction
+        from realized volatility, session/calendar state, or order flow direction. Fables
+        (fables.fi/docs/swap-fee) is a real, live example, not a hypothetical: it names three
+        such models (Calendar, Flat base, Directional) and documents that even its keeper-driven
+        overrides are bounded on-chain -- capped at a 50% discount off the model rate, a 72-hour
+        max time-to-live, and an immutable absolute fee ceiling in the contract bytecode. Those
+        bounds are exactly the kind of hook-level detail this tool has no API access to for any
+        given pool (see block_unknown_v4_hooks below) -- knowing that legitimate bounds *can*
+        exist somewhere on-chain doesn't mean this tool can see them for the pool in front of it.
+        A single feeRate read is then a live, momentary number, not a stable rate -- annualizing
+        it as if it were static (which is what produces `apy`) is structurally wrong regardless
+        of whether the hook itself is legitimate and bounded. Flag it as "not a static rate we
+        can annualize," not as "probably malicious."
       - TVL below a floor where a single trade can dominate the annualized apy estimate.
       - apy is a large outlier versus other pools on the *same* underlying ticker -- this is
         the general form of the feeRate check: it catches any mechanism (stale data, a
@@ -82,7 +89,13 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
         ones with an already-visible symptom like an extreme feeRate. Detected primarily via
         the structured `defiProtocolId` (e.g. "uniswap4"), not the display name -- see
         `_protocol_carries_unaudited_hook_risk`. Pass False to disable for an already-vetted
-        pool or explicit user override.
+        pool or explicit user override. This default isn't excess caution over a hypothetical:
+        Fables' own security page (fables.fi/docs/security) states plainly that no
+        Fables-specific audit report is currently published, for a protocol sophisticated
+        enough to run three named fee models with bounded keeper overrides (see the feeRate
+        note above). Being a real, live V4 hook protocol was never going to be evidence that
+        a given hook is safe to trust blindly -- a live example admitting exactly that about
+        itself confirms it.
     """
     flags = []
 

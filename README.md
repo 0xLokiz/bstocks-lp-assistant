@@ -283,21 +283,30 @@ advance — that's the generalization this section is about.
 
 **Not necessarily malicious.** [Fables](https://www.fables.fi) — a live
 hook-native ve(3,3) DEX on Uniswap v4, also trading tokenized stocks — runs
-"intelligent fees": hooks that reprice the swap fee per-transaction from
-realized volatility, calendar/session state, or order-flow direction,
-bounded and keeper-driven; their own docs describe a displayed fee as "the
-latest contract read, not a quote that can bind a later transaction." A
-`feeRate` snapshot from a pool like that is a live, momentary number — our
-static-rate annualization is structurally the wrong tool for it, whether or
-not the hook is legitimate. The flag means "we can't compute a meaningful
-apy for this," not an accusation.
+"intelligent fees": hooks that reprice the swap fee per-transaction under one
+of three named models (Calendar — session/overnight/weekend/holiday-aware;
+Flat base; Directional — responds to order-flow direction). Its own docs
+(fables.fi/docs/swap-fee) confirm even keeper-driven overrides are bounded
+on-chain — capped at a 50% discount off the model rate, a 72-hour max
+time-to-live, and an immutable absolute fee ceiling in the contract bytecode
+— and describe a displayed fee as "the latest contract read, not a quote
+that can bind a later transaction." A `feeRate` snapshot from a pool like
+that is a live, momentary number — our static-rate annualization is
+structurally the wrong tool for it, whether or not the hook is legitimate.
+The flag means "we can't compute a meaningful apy for this," not an
+accusation.
 
 **Limitation worth stating plainly**: `securityScore` comes from
 `defi protocol-info` and is per-*protocol*, not per-pool or per-hook —
 Uniswap V3 and V4 both score 95.18 because it's the same organization, so
 this signal gave zero warning on the QQQB case. It's a floor against
 disreputable protocols, not a hook audit — see Roadmap for the deeper
-V4-hook-safety item this doesn't replace.
+V4-hook-safety item this doesn't replace. Worth noting the block isn't
+excess caution over a hypothetical: Fables' own security page
+(fables.fi/docs/security) states plainly that no Fables-specific audit
+report is currently published, for a protocol sophisticated enough to ship
+three bounded fee models — being a real, live V4 hook protocol was never
+going to be proof that a given hook is safe to trust blindly.
 
 ## Caveats (read before trusting the numbers)
 
@@ -312,7 +321,13 @@ V4-hook-safety item this doesn't replace.
   confirmed data-availability limit, not an oversight: an incentive-heavy
   `apy` can look attractive right up until the incentive program ends, with
   nothing in this tool able to see it coming. Every `scan`/`recommend`
-  output prints this caveat (`model_apy_caveat` in `--json`).
+  output prints this caveat (`model_apy_caveat` in `--json`). Independent
+  corroboration: [Fables](https://www.fables.fi/docs/methodology), an
+  unrelated live Uniswap-v4-hook exchange, documents annualizing its own
+  headline pool APR the identical way (24h fee window over current TVL) and
+  its own docs warn that figure isn't a forecast and doesn't net out
+  divergence from holding — exactly why `model_net_apy` subtracts modeled IL
+  from the raw platform `apy` instead of presenting it as-is.
 - **Historical vol is backward-looking.** Stock tokens can gap hard around
   earnings, dividends, splits, and trading halts — check
   `binance-tokenized-securities-info`'s asset-market-status API for upcoming
@@ -632,25 +647,29 @@ already built.
   leaving them as untested theory. Meaningfully larger scope than everything
   else on this list — flagged, not attempted, in this pass.
 - **Robinhood Chain compatibility.** Confirmed concrete, not speculative:
-  [Fables](https://www.fables.fi) is live on Robinhood Chain today, trading
-  tokenized stocks (NVDA/USDG, TSLA/USDG, AAPL/USDG, SPY/USDG, ...) against
-  a public Blockscout explorer at `robinhoodchain.blockscout.com` — Blockscout
-  instances standardly expose a REST/GraphQL API, which is a plausible near-
-  term path to pulling comparable market/pool data the way `fetch_stock_tokens`
-  / `fetch_klines` do for Binance's bapi. If that data proves comparably
-  accessible, extending `stocks`/`vol`/`scan` to include it turns this from a
-  Binance-only screener into a cross-venue one — genuinely more useful for
-  "which venue's LP on this same underlying is actually the better deal,"
-  not just which pool within one venue.
-- **Session-aware volatility.** Fables' "Calendar" fee model reprices
+  [Fables](https://www.fables.fi) is live on Robinhood Chain today (chain ID
+  4663, per fables.fi/docs/addresses), trading tokenized stocks (NVDA/USDG,
+  TSLA/USDG, AAPL/USDG, SPY/USDG, ...) against a public Blockscout explorer at
+  `robinhoodchain.blockscout.com` — Blockscout instances standardly expose a
+  REST/GraphQL API, which is a plausible near-term path to pulling comparable
+  market/pool data the way `fetch_stock_tokens` / `fetch_klines` do for
+  Binance's bapi. If that data proves comparably accessible, extending
+  `stocks`/`vol`/`scan` to include it turns this from a Binance-only screener
+  into a cross-venue one — genuinely more useful for "which venue's LP on this
+  same underlying is actually the better deal," not just which pool within one
+  venue.
+- **Session-aware volatility.** Fables' documented fee models
+  (fables.fi/docs/swap-fee) include a "Calendar" one that reprices
   differently for session/overnight/weekend/holiday state specifically
   *because* tokenized-stock trading behavior differs across those windows
-  (the underlying only has real market-making during NYSE/NASDAQ hours).
-  `annualized_volatility()` currently treats all klines as one homogeneous
-  series; splitting realized vol into regular-hours vs. off-hours segments
-  (using `binance-tokenized-securities-info`'s market-status API to label
-  each candle) would likely sharpen `vol_ratio` and range recommendations
-  for exactly the reason Fables built a whole fee model around it.
+  (the underlying only has real market-making during NYSE/NASDAQ hours) —
+  one of three named models, alongside Flat base and Directional (order-flow-
+  responsive). `annualized_volatility()` currently treats all klines as one
+  homogeneous series; splitting realized vol into regular-hours vs. off-hours
+  segments (using `binance-tokenized-securities-info`'s market-status API to
+  label each candle) would likely sharpen `vol_ratio` and range
+  recommendations for exactly the reason Fables built a whole fee model
+  around it.
 - **Effective execution-price model for single-sided ranges** — right now a
   `--side sell`/`buy` range reuses the IL-vs-hold formula as a cost proxy;
   the real question ("what average price do I actually sell/buy at, versus
@@ -682,6 +701,41 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (read Fables' docs end to end, cited what it corroborates)
+
+Asked directly to fully read Fables' documentation (fables.fi/docs) for
+anything worth borrowing, and implement it directly. Read the overview,
+swap-fee, risks, security, methodology, permissions, addresses, fees,
+providing-liquidity, price-moves, and APR pages. Two of this project's
+existing design decisions turned out to already match what a live production
+V4-hook protocol independently documents about itself, so the useful
+change was citing that corroboration precisely rather than inventing new
+mechanics: (1) Fables' own data-methodology page confirms annualizing a
+pool's headline APR from a 24-hour fee window over current TVL -- the exact
+mechanism this tool's `MODEL_APY_CAVEAT` already warned about from its own
+live observations (a pool's TVL/apy swinging sharply minutes apart) -- and
+its APR page states plainly that figure isn't a forecast and doesn't net
+out divergence from holding, which is precisely why `model_net_apy`
+subtracts modeled IL instead of presenting the raw platform `apy`; (2)
+Fables' security page states no Fables-specific audit report is currently
+published, direct evidence (not a hypothetical) that "a real V4 hook
+protocol" was never proof a given hook is safe, reinforcing this tool's
+existing hard-block-by-default on V4 pools. Added the specific, verifiable
+citations (methodology/APR/security page URLs, the three named fee models,
+the concrete keeper-override bounds: 50% max discount, 72h max TTL, an
+immutable bytecode ceiling) to `MODEL_APY_CAVEAT`, `MODEL.md` §7/§9, and the
+V4-hard-block/Caveats sections of both READMEs -- also separately
+investigated whether this project's own `pool.get("apy") or 0`-style
+fallbacks repeat the "confident zero for missing data" mistake Fables'
+methodology page explicitly warns against: they don't, since every one of
+them is either a documented last-resort in an already-prioritized
+multi-source fallback chain, or fails toward excluding/flagging a pool as
+unattractive rather than toward a false "safe" or "attractive" reading --
+the safe direction, so no code change was needed there. Also tightened the
+Roadmap's Robinhood Chain and session-aware-volatility items with the
+chain ID (4663) and the three fee-model names, now that the docs confirm
+both directly instead of by inference.
 
 ### Recently shipped (a standing DYOR/risk disclaimer, not just a caveat)
 
