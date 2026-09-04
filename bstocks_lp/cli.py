@@ -227,14 +227,7 @@ def cmd_range(args):
             print("check the investmentId is correct, or run `baw auth signin` / `baw auth verify` "
                   "if the session has expired.", file=sys.stderr)
             sys.exit(1)
-        flags = risk_screen.pool_risk_flags({}, info, block_unknown_v4_hooks=not args.allow_v4)
-        if flags:
-            print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}) failed the pre-deposit screen:", file=sys.stderr)
-            for f in flags:
-                print(f"  - {f}", file=sys.stderr)
-            print("Proceeding anyway since an investmentId was given explicitly, but treat every "
-                  "number below as unreliable -- do not recommend this pool.\n", file=sys.stderr)
-        apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
+        apy = market_data.resolve_pool_apy({}, info)
         stock_tokens = market_data.fetch_stock_tokens()
         stock_index = market_data.build_stock_index(stock_tokens)
         stock, chain_id, quote_addr, pair_mode = market_data.resolve_pool_stock_and_quote({}, info, stock_index)
@@ -244,9 +237,31 @@ def cmd_range(args):
                   file=sys.stderr)
             sys.exit(1)
         sigma = volatility.resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode)
+        if sigma is None:
+            print("not enough kline history to estimate volatility", file=sys.stderr)
+            sys.exit(1)
+        # Route through the same evaluate_pool() path scan/rebalance-check use, not a
+        # stripped-down check -- confirmed live as a real gap: this used to call
+        # pool_risk_flags() directly with no peer_apys/protocol_security_score, so a pool `scan`
+        # would flag and exclude (an apy outlier, or a low protocol securityScore) could be
+        # looked up here and show a full range breakdown with no warning at all. peer_apys is
+        # still None -- a single-pool lookup has no market/peer context to compare against --
+        # but protocol_security_score is now fetched, closing the cheaper, pool-specific half of
+        # the gap at the cost of one extra `defi protocol-info` call.
+        protocol_id = info.get("defiProtocolId")
+        security_score = market_data.fetch_protocol_security_score(protocol_id, {}) if protocol_id else None
+        evaluation = risk_screen.evaluate_pool({}, info, sigma, apy, protocol_security_score=security_score,
+                                                block_unknown_v4_hooks=not args.allow_v4)
+        flags = evaluation["flags"]
+        if flags:
+            print(f"WARNING: {info.get('investmentName')} ({info.get('protocolName')}) failed the pre-deposit screen:", file=sys.stderr)
+            for f in flags:
+                print(f"  - {f}", file=sys.stderr)
+            print("Proceeding anyway since an investmentId was given explicitly, but treat every "
+                  "number below as unreliable -- do not recommend this pool.\n", file=sys.stderr)
         pair_note = "" if pair_mode == "stablecoin" else " -- non-stablecoin pair, vol is relative to the quote asset"
         label = f"{info['investmentName']} ({stock['ticker']}){pair_note}"
-        pool_tvl = float(info.get("tvl") or 0)
+        pool_tvl = market_data.resolve_pool_tvl({}, info)
     else:
         if args.apy is None or args.ticker is None:
             print("provide --investmentId, or both --ticker and --apy", file=sys.stderr)
@@ -582,24 +597,30 @@ def _peer_apys_for_ticker(ticker, market_results, exclude_investment_id=None):
             if r["stock_ticker"] == ticker and r["investmentId"] != exclude_investment_id]
 
 
-def _evaluate_held_investment_id(investment_id, stock_index, market_results, allow_v4):
+def _evaluate_held_investment_id(investment_id, stock_index, market_results, allow_v4, security_score_cache):
     """Evaluate one held investmentId that fell outside the scanned market set (e.g. ranked
     outside the fetched pages), via the same evaluate_pool() path scan uses -- including
     peer_apys and protocol_security_score, so this fallback can't reach a laxer conclusion
     than scan would have for the same pool. Returns (vol_ratio, model_net_apy, flags, evaluated)
     -- both are None when flagged or unevaluated; model_net_apy alone can also be None on its
     own when the pool's volatility is too extreme for expected_il_fraction to produce a valid
-    estimate (vol_ratio is unaffected either way -- see il_model.risk_adjusted_apy)."""
+    estimate (vol_ratio is unaffected either way -- see il_model.risk_adjusted_apy).
+
+    `security_score_cache` must be a dict shared across every call in the same
+    cmd_rebalance_check run, not a fresh `{}` per call -- fetch_protocol_security_score's own
+    caching only dedupes calls that share a cache object; two held positions on the same
+    protocol used to each spawn their own `defi protocol-info` subprocess otherwise."""
     try:
         info = market_data.fetch_investment_info(investment_id)
         stock, chain_id, quote_addr, pair_mode = market_data.resolve_pool_stock_and_quote({}, info, stock_index)
         sigma = volatility.resolve_pool_volatility(stock, chain_id, quote_addr, pair_mode) if stock else None
         if not (sigma and sigma > 0):
             return None, None, [], False
-        apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
+        apy = market_data.resolve_pool_apy({}, info)
         peer_apys = _peer_apys_for_ticker(stock["ticker"], market_results, exclude_investment_id=investment_id)
         protocol_id = info.get("defiProtocolId")
-        security_score = market_data.fetch_protocol_security_score(protocol_id, {}) if protocol_id else None
+        security_score = (market_data.fetch_protocol_security_score(protocol_id, security_score_cache)
+                           if protocol_id else None)
         evaluation = risk_screen.evaluate_pool({}, info, sigma, apy, peer_apys=peer_apys,
                                                 protocol_security_score=security_score,
                                                 block_unknown_v4_hooks=not allow_v4)
@@ -659,6 +680,9 @@ def cmd_rebalance_check(args):
 
     market_by_id = {r["investmentId"]: r for r in market_results}
     flagged_by_id = {f["investmentId"]: f for f in market_flagged}
+    # Shared across every _evaluate_held_investment_id call below so two held positions on the
+    # same protocol reuse one `defi protocol-info` fetch instead of each spawning their own.
+    security_score_cache: dict[str, float | None] = {}
 
     if not args.json:
         print(f"\n{'held pool (ticker)':<28}{'held grade':>14}{'best market grade':>20}")
@@ -679,7 +703,7 @@ def cmd_rebalance_check(args):
                 # pages) -- evaluate it directly via the same evaluate_pool() path rather than
                 # silently skip it.
                 ratio, model_apy, flags, evaluated = _evaluate_held_investment_id(
-                    inv_id, stock_index, market_results, args.allow_v4)
+                    inv_id, stock_index, market_results, args.allow_v4, security_score_cache)
                 per_id.append({"investmentId": inv_id, "vol_ratio": ratio, "model_net_apy": model_apy,
                                 "flags": flags, "evaluated": evaluated})
 
@@ -753,12 +777,18 @@ def cmd_rebalance_check(args):
             positions=rows,
             any_needs_attention=any(r["needs_attention"] for r in rows),
             market_coverage=market_coverage,
+            model_apy_caveat=il_model.MODEL_APY_CAVEAT,
             dyor_disclaimer=config.DYOR_DISCLAIMER,
             v4_override_reason=args.allow_v4,
         ), indent=2))
     else:
         print("\nRecommendation only -- nothing moved. To act, use `defi redeem`/`lp-remove` then "
               "`defi deposit`/`lp-add` via binance-agentic-wallet's confirmed flow.")
+        # Every other command that displays a model_net_apy-derived number prints this caveat
+        # alongside DYOR_DISCLAIMER -- rebalance-check used to print only the latter, even
+        # though it shows held/alternative apy and a dollar switching-cost estimate, all
+        # model_net_apy-derived numbers the caveat exists to qualify.
+        print(f"\n{il_model.MODEL_APY_CAVEAT}")
         print(f"\n{config.DYOR_DISCLAIMER}")
 
 
@@ -773,6 +803,20 @@ def _nonneg_float(s):
     v = float(s)
     if v < 0:
         raise argparse.ArgumentTypeError(f"must be >= 0, got {v}")
+    return v
+
+
+def _positive_band_width(s):
+    """--band-width specifically: unlike --target-offset (a signed distance from current
+    price), a band's width is a magnitude and is never meaningfully negative or zero --
+    range_model.recommend_range's sell/buy math (pb = 1 + offset + band_width /
+    pa = pb - band_width) needs it strictly positive to keep pa < pb. Confirmed live: a
+    negative --band-width let _offset_fraction's wider (-0.99, 10) range through, then crashed
+    with an unhandled ValueError several calls deeper in range_model.range_metrics instead of a
+    clean argparse error at the CLI boundary."""
+    v = float(s)
+    if not (0 < v < 10):
+        raise argparse.ArgumentTypeError(f"must be between 0 and 10 (exclusive), got {v}")
     return v
 
 
@@ -865,7 +909,7 @@ def build_parser():
     p_range.add_argument("--target-offset", type=_offset_fraction, default=None,
                           help="sell/buy only: exact offset from current price (0.15 = 15%%) to evaluate "
                                "in addition to the preset sweep -- for a specific target price, not just presets")
-    p_range.add_argument("--band-width", type=_offset_fraction, default=range_model.SIDED_BAND_WIDTH,
+    p_range.add_argument("--band-width", type=_positive_band_width, default=range_model.SIDED_BAND_WIDTH,
                           help=f"sell/buy only: width of the --target-offset band (default {range_model.SIDED_BAND_WIDTH})")
     p_range.add_argument("--capital", type=_nonneg_float, default=None,
                           help="optional (--investmentId only): intended deposit size in USD -- shows "

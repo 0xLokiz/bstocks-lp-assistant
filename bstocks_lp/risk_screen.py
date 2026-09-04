@@ -5,7 +5,7 @@ advertised APY even real, and is the pool safe to put money into. See MODEL.md s
 import re
 import statistics
 
-from bstocks_lp import il_model
+from bstocks_lp import il_model, market_data
 
 MAX_SANE_FEE_RATE = 0.05      # 5% per swap -- generous; real fee tiers top out around 1%
 MIN_SANE_TVL_USD = 5_000       # below this, a single trade can dominate the annualized apy
@@ -36,7 +36,7 @@ def _protocol_carries_unaudited_hook_risk(protocol_id, protocol_name):
     return "v4" in (protocol_name or "").lower()
 
 
-def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
+def pool_risk_flags(pool, info, apy, peer_apys=None, protocol_security_score=None,
                      max_fee_rate=MAX_SANE_FEE_RATE, min_tvl_usd=MIN_SANE_TVL_USD,
                      peer_outlier_multiple=PEER_APY_OUTLIER_MULTIPLE,
                      min_peer_sample_size=MIN_PEER_SAMPLE_SIZE,
@@ -69,7 +69,13 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
       - apy is a large outlier versus other pools on the *same* underlying ticker -- this is
         the general form of the feeRate check: it catches any mechanism (stale data, a
         calculation bug, a temporary spike, a hook doing something unexpected) that produces
-        an implausible apy, not just the one specific cause already identified once. `peer_apys`
+        an implausible apy, not just the one specific cause already identified once. Compared
+        against the caller's already-resolved `apy` (via `market_data.resolve_pool_apy`), not
+        recomputed here -- this function used to re-derive apy from `info` alone with a
+        narrower 2-tier fallback, missing the 3rd (`pool.get("apy")`) tier the canonical
+        resolution uses, so a pool whose `info` carried neither `apy` nor `apyBps` could
+        silently outlier-check against apy=0.0 while every other reading of the same pool used
+        its real value -- fixed by taking the resolved apy as a parameter instead. `peer_apys`
         must already exclude this pool's own apy (by identity, e.g. investmentId) -- it is used
         as-is, not filtered by value, so two distinct pools that happen to share an apy don't
         wrongly exclude each other. Only fires when at least `min_peer_sample_size` peers exist
@@ -131,12 +137,11 @@ def pool_risk_flags(pool, info, peer_apys=None, protocol_security_score=None,
         except (TypeError, ValueError):
             pass
 
-    tvl = float(pool.get("tvl") or info.get("tvl") or 0)
+    tvl = market_data.resolve_pool_tvl(pool, info)
     if tvl < min_tvl_usd:
         flags.append(f"TVL ${tvl:,.0f} is below ${min_tvl_usd:,.0f} -- apy from this little "
                       f"liquidity is statistically noisy, easily swung by a single trade")
 
-    apy = float(info["apy"]) if info.get("apy") is not None else float(info.get("apyBps") or 0) / 10000
     if peer_apys and len(peer_apys) >= min_peer_sample_size:
         median = statistics.median(peer_apys)
         if median > 0 and apy > median * peer_outlier_multiple:
@@ -173,7 +178,7 @@ def evaluate_pool(pool, info, sigma, apy, peer_apys=None, protocol_security_scor
     computed, even when flags is non-empty, so a caller can show the numbers alongside a
     prominent "don't trust this" -- but never rank or recommend a pool with any flags.
     """
-    flags = pool_risk_flags(pool, info, peer_apys=peer_apys, protocol_security_score=protocol_security_score,
+    flags = pool_risk_flags(pool, info, apy, peer_apys=peer_apys, protocol_security_score=protocol_security_score,
                              max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl_usd,
                              peer_outlier_multiple=peer_outlier_multiple,
                              min_peer_sample_size=min_peer_sample_size,

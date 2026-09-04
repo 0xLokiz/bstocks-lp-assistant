@@ -126,10 +126,22 @@ def baw(*args):
         raise RuntimeError(
             f"baw {' '.join(args)} produced no output (exit code {result.returncode}, stderr: {result.stderr.strip()})"
         )
-    first_brace = stdout.find("{")
     try:
-        return json.loads(stdout[first_brace:] if first_brace > 0 else stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"baw {' '.join(args)} produced non-JSON output (exit code {result.returncode}): {stdout[:500]!r}"
-        ) from e
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        pass
+    # Recovery path only: some stray text before the real --json payload (a warning/deprecation
+    # line, say) is the one case the strict parse above doesn't handle. `find("{")` isn't a safe
+    # first choice, though -- if that leading text itself contains a literal `{` before the
+    # payload starts, slicing from it produces a truncated/wrong-boundary string instead of the
+    # real JSON. Only fall back to it after the honest parse has already failed, and only as a
+    # best-effort recovery, not the primary path.
+    first_brace = stdout.find("{")
+    if first_brace > 0:
+        try:
+            return json.loads(stdout[first_brace:])
+        except json.JSONDecodeError:
+            pass
+    raise RuntimeError(
+        f"baw {' '.join(args)} produced non-JSON output (exit code {result.returncode}): {stdout[:500]!r}"
+    )

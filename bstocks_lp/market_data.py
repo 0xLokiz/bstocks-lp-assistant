@@ -74,17 +74,26 @@ def fetch_lp_investments(max_pages=3):
     each, independent of network latency), and fetching them one at a time was pure sequential
     wait for calls that don't depend on each other, same as run_scan's Pass 1/Pass 2 fetches.
 
-    Returns (pools, pools_total). Without pools_total, `len(pools) < max_pages * 100` was the
-    only way to even suspect a scan was cut short -- a real gap: answering "did this cover every
-    pool?" took a live manual investigation before pools_total existed. Callers compare it
-    against len(pools) to tell a genuinely-complete scan apart from one `max_pages` truncated.
+    Returns (pools, pools_total). `pools_total` is `None` when the API response omits the
+    `total` field -- a real, previously-live bug: defaulting a missing total to `0` made
+    `needed_pages = ceil(0/100) = 0`, silently capping pagination at page 1 even after a
+    completely full first page, and separately made the caller's `truncated = len(pools) <
+    pools_total` check read `100 < 0 = False` -- falsely reporting a cut-short scan as complete
+    with no coverage warning at all. When the total is unknown, pagination now falls back to
+    fetching up to `max_pages` regardless (the same "no total available" behavior this function
+    had before `pools_total` existed), and the caller is expected to treat `None` as "coverage
+    can't be verified," not "0 pools total." Without pools_total at all, `len(pools) < max_pages
+    * 100` was the only way to even suspect a scan was cut short -- a real gap: answering "did
+    this cover every pool?" took a live manual investigation before pools_total existed. Callers
+    compare it against len(pools) to tell a genuinely-complete scan apart from one `max_pages`
+    truncated.
     """
     page1 = _fetch_investment_list_page(1)
     pools_by_page = {1: page1["list"]}
-    pools_total = page1.get("total", 0)
+    pools_total = page1.get("total") or None
 
     if len(pools_by_page[1]) == 100 and max_pages > 1:
-        needed_pages = min(max_pages, -(-pools_total // 100))  # ceil(pools_total / 100)
+        needed_pages = max_pages if pools_total is None else min(max_pages, -(-pools_total // 100))  # ceil
         remaining = range(2, needed_pages + 1)
         if remaining:
             with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as executor:
@@ -112,14 +121,23 @@ def fetch_investment_info(investment_id):
 def fetch_protocol_security_score(defi_protocol_id, cache):
     """Cached lookup of a protocol's securityScore via `defi protocol-info`. Score is
     per-protocol (shared across e.g. Uniswap V3 and V4), so cache by defiProtocolId to
-    avoid a repeat API call per pool on the same protocol."""
+    avoid a repeat API call per pool on the same protocol. Pass a dict that outlives a single
+    call for the caching to do anything -- a fresh `{}` per call (as callers used to pass)
+    never hits, silently making the cache dead weight.
+
+    Raises on a genuine fetch failure (network/timeout/malformed response) instead of
+    swallowing it to `None` -- a real, previously-live bug: `None` is also the legitimate
+    "this response has no securityScore field" case, and the security-score risk-screen check
+    treats `None` as "nothing to check" (skips the floor entirely, not "fails it"). Swallowing
+    a transient network error into the same `None` silently disabled that safety check for
+    every pool on the affected protocol, with no flag or warning anywhere. Callers that can't
+    tell the two apart from a raised exception should treat "fetch failed" as more like the
+    V4-hook default (unknown = flagged), not "safe to skip."
+    """
     if defi_protocol_id in cache:
         return cache[defi_protocol_id]
-    try:
-        body = api.baw("defi", "protocol-info", "--defiProtocolId", defi_protocol_id)
-        score = body["data"].get("securityScore") if body.get("success") else None
-    except Exception:
-        score = None
+    body = api.baw("defi", "protocol-info", "--defiProtocolId", defi_protocol_id)
+    score = body["data"].get("securityScore") if body.get("success") else None
     cache[defi_protocol_id] = score
     return score
 
@@ -130,6 +148,37 @@ def fetch_positions(refresh=False):
     if not body.get("success"):
         raise RuntimeError(json.dumps(body.get("error", body)))
     return body["data"]
+
+
+def resolve_pool_tvl(pool, info):
+    """The one TVL-resolution fallback chain: prefer `investment-list`'s `tvl`, fall back to
+    `investment-info`'s. Previously hand-typed three different ways in three places -- this
+    2-source chain in risk_screen.pool_risk_flags, `pool`-only (no `info` fallback) in scan.py's
+    result-row TVL, and `info`-only (no `pool` fallback) in cli.py's cmd_range -- so the TVL the
+    risk screen's floor check ran against could differ from the TVL a pool's own result row
+    displayed to the user. One implementation now, called everywhere TVL is derived from raw
+    API data.
+    """
+    return float(pool.get("tvl") or info.get("tvl") or 0)
+
+
+def resolve_pool_apy(pool, info):
+    """The one apy-resolution fallback chain: `investment-info`'s `apy` is null/0 for most
+    concentrated (V3) LP pools; `apyBps` (basis points) carries the real fee-based rate instead;
+    `investment-list`'s own `apy` is the last resort when `info` has neither. This exact 3-tier
+    chain used to be hand-typed separately in four places (risk_screen.pool_risk_flags, this
+    module's caller in scan.py, and twice in cli.py) -- three of those four copies were missing
+    the third (`pool.get("apy")`) tier, so a pool whose `info` carried neither `apy` nor
+    `apyBps` could silently resolve to apy=0.0 in one place (e.g. pool_risk_flags's peer-outlier
+    check) while resolving to its real value everywhere else that used the full chain, letting
+    the two readings of "this pool's apy" for the same pool diverge. One implementation now,
+    called everywhere apy is derived from raw API data.
+    """
+    if info.get("apy") is not None:
+        return float(info["apy"])
+    if info.get("apyBps") is not None:
+        return float(info["apyBps"]) / 10000
+    return float(pool.get("apy") or 0)
 
 
 def build_stock_index(stock_tokens):

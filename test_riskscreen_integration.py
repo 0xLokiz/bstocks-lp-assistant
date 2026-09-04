@@ -44,8 +44,10 @@ class FakeBaw:
         self.investment_list_page1 = []
         self.investment_list_extra_pages: dict = {}  # page number (2+) -> pool list, default empty
         self.investment_list_total = None  # None -> defaults to len(page1), i.e. not truncated
+        self.investment_list_omit_total = False  # True -> "total" key absent entirely from the response
         self.investment_info = {}       # investmentId -> info dict
         self.protocol_security_score = {}  # defiProtocolId -> score
+        self.protocol_security_score_error: set = set()  # defiProtocolId -> raise instead of a score
         self.positions: dict = {"deFiProtocolVOList": []}
         self.calls = []
 
@@ -55,9 +57,11 @@ class FakeBaw:
         if head == "defi" and args[1] == "investment-list":
             page = int(args[args.index("--page") + 1])
             pools = self.investment_list_page1 if page == 1 else self.investment_list_extra_pages.get(page, [])
-            total = (self.investment_list_total if self.investment_list_total is not None
-                     else len(self.investment_list_page1))
-            return {"success": True, "data": {"list": pools, "total": total}}
+            data = {"list": pools}
+            if not self.investment_list_omit_total:
+                data["total"] = (self.investment_list_total if self.investment_list_total is not None
+                                  else len(self.investment_list_page1))
+            return {"success": True, "data": data}
         if head == "defi" and args[1] == "investment-info":
             inv_id = args[args.index("--investmentId") + 1]
             info = self.investment_info.get(inv_id)
@@ -66,6 +70,8 @@ class FakeBaw:
             return {"success": True, "data": info}
         if head == "defi" and args[1] == "protocol-info":
             pid = args[args.index("--defiProtocolId") + 1]
+            if pid in self.protocol_security_score_error:
+                raise RuntimeError(f"protocol-info transient failure for {pid}")
             score = self.protocol_security_score.get(pid, 90)
             return {"success": True, "data": {"securityScore": score}}
         if head == "defi" and args[1] == "position":
@@ -428,6 +434,53 @@ def test_fetch_lp_investments_stops_at_max_pages_even_when_more_exist(fake_io):
     assert pages_requested == {"1", "2"}
 
 
+def test_fetch_lp_investments_keeps_fetching_when_total_is_omitted(fake_io):
+    # Confirmed live as a real bug: pools_total used to default to 0 when the API response
+    # omitted "total" entirely, which made needed_pages = ceil(0/100) = 0 -- pagination
+    # silently stopped after page 1 even though it came back completely full. Now a missing
+    # total falls back to fetching up to max_pages, and pools_total comes back None so the
+    # caller can tell "unknown" apart from "confirmed zero more pools".
+    fb, fg = fake_io
+    fb.investment_list_page1 = [pool_entry(f"inv{i}", f"P{i}-USDT", "PancakeSwap V3", "pancakeswap3")
+                                 for i in range(100)]
+    fb.investment_list_extra_pages = {
+        2: [pool_entry(f"inv2_{i}", f"Q{i}-USDT", "PancakeSwap V3", "pancakeswap3") for i in range(50)],
+    }
+    fb.investment_list_omit_total = True
+
+    pools, total = market_data.fetch_lp_investments(max_pages=3)
+
+    assert total is None
+    assert len(pools) == 150  # page 1 (100, full) + page 2 (50, short) -- page 3's data unused
+    # Pages 2 and 3 are requested concurrently up front, before page 2's short length is known
+    # (total is genuinely unknown, so this fetches up to max_pages, the safe direction) -- the
+    # old bug is that page 2 wouldn't even have been *requested*, stopping at just {"1"}.
+    page_requests = [c for c in fb.calls if c[0] == "defi" and c[1] == "investment-list"]
+    pages_requested = {c[c.index("--page") + 1] for c in page_requests}
+    assert pages_requested == {"1", "2", "3"}
+
+
+def test_run_scan_coverage_reports_truncated_when_total_is_unknown_and_page_cap_hit(fake_io):
+    # The scan.py half of the same fix: pools_total=None with a full max_pages*100 worth of
+    # pools fetched must report truncated=True (coverage can't be verified as complete), not
+    # the old false "truncated=False" that a defaulted-to-0 total used to produce.
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry(f"inv{i}", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")
+                                 for i in range(100)]
+    fb.investment_list_omit_total = True
+    asset_list = [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+                  {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}]
+    for i in range(100):
+        fb.investment_info[f"inv{i}"] = info_entry("NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", asset_list)
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+
+    results, flagged, unscoreable, coverage = scan.run_scan(max_pages=1)
+
+    assert coverage["pools_total"] is None
+    assert coverage["truncated"] is True
+
+
 # ---- malformed / missing / type-drifted API responses ----
 
 def test_fetch_stock_tokens_raises_clear_error_on_missing_success_field(fake_io, monkeypatch):
@@ -448,6 +501,79 @@ def test_fetch_investment_info_raises_on_baw_error_envelope(fake_io):
     # investmentId not registered -> FakeBaw's own {"success": False, ...} envelope
     with pytest.raises(RuntimeError):
         market_data.fetch_investment_info("does-not-exist")
+
+
+def test_fetch_protocol_security_score_raises_instead_of_swallowing():
+    # Confirmed live: this used to catch every exception and return None, indistinguishable
+    # downstream from "this protocol legitimately has no securityScore" -- pool_risk_flags
+    # treats None as "nothing to check", silently skipping the floor rather than flagging it as
+    # unverified. Now it raises, and callers (run_scan, _evaluate_held_investment_id) are
+    # responsible for treating a failed fetch as "unknown, not safe" instead.
+    def boom(*args):
+        raise RuntimeError("protocol-info transient failure")
+    import bstocks_lp.api as real_api
+    orig = real_api.baw
+    real_api.baw = boom
+    try:
+        with pytest.raises(RuntimeError):
+            market_data.fetch_protocol_security_score("pancakeswap3", {})
+    finally:
+        real_api.baw = orig
+
+
+def test_run_scan_flags_pool_when_security_score_fetch_fails(fake_io):
+    # scan.py's half of the same fix: a protocol whose security-score fetch failed must not
+    # silently score its pools as if the check passed -- confirmed live this was a real
+    # fail-open path (a network blip could let a genuinely disreputable protocol's pool through
+    # with zero warning).
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [pool_entry("inv1", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3")]
+    asset_list = [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+                  {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}]
+    fb.investment_info["inv1"] = info_entry("NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", asset_list)
+    fb.protocol_security_score_error = {"pancakeswap3"}
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+
+    results, flagged, unscoreable, coverage = scan.run_scan(max_pages=1)
+
+    assert not results  # must not silently pass through as if the score check succeeded
+    assert len(flagged) == 1
+    assert any("could not be fetched" in f for f in flagged[0]["flags"])
+
+
+def test_run_scan_one_malformed_pool_does_not_abort_the_whole_batch(fake_io):
+    # Confirmed live: pool_risk_flags's tvl/apy float() coercion had no try/except around it
+    # (unlike feeRate/security-score two lines away, which do), and Pass 2's scoring loop called
+    # it with no try/except of its own either -- a single pool with a non-numeric tvl/apy field
+    # used to raise ValueError uncaught, aborting scoring for every pool in the batch, not just
+    # the malformed one. Now it's isolated into `unscoreable`, same as Pass 1's own per-pool
+    # error handling for the identical class of problem.
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_list_page1 = [
+        # resolve_pool_tvl checks `pool`'s own tvl first (falling back to `info` only when
+        # pool's is missing) -- the malformed value has to be here to actually be reached.
+        pool_entry("bad", "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", tvl="not-a-number"),
+        pool_entry("good", "NVDAB-BNB", "PancakeSwap V3", "pancakeswap3"),
+    ]
+    nvda = nvda_token()
+    usdt_asset_list = [{"tokenAddress": nvda["contractAddress"], "tokenSymbol": "NVDAB"},
+                        {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}]
+    bnb_asset_list = [{"tokenAddress": nvda["contractAddress"], "tokenSymbol": "NVDAB"},
+                       {"tokenAddress": BNB_NATIVE, "tokenSymbol": "BNB"}]
+    fb.investment_info["bad"] = info_entry("NVDAB-USDT", "PancakeSwap V3", "pancakeswap3", usdt_asset_list)
+    fb.investment_info["good"] = info_entry("NVDAB-BNB", "PancakeSwap V3", "pancakeswap3", bnb_asset_list)
+    fg.klines[("56", nvda["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+    fg.klines[("56", BNB_NATIVE.lower())] = make_price_klines(60, daily_return=0.003)  # distinct rate --
+    # identical returns on both legs make the price *ratio* constant (sigma=0), a degenerate
+    # case unrelated to what this test is actually checking.
+
+    results, flagged, unscoreable, coverage = scan.run_scan(max_pages=1)
+
+    assert any(u["pool"] == "NVDAB-USDT" and "could not evaluate risk screen" in u["reason"]
+               for u in unscoreable)
+    assert any(r["pool"] == "NVDAB-BNB" for r in results)  # the other pool still scored normally
 
 
 # ---- baw() itself: subprocess-level failures, without a real subprocess ----
@@ -594,6 +720,30 @@ def test_range_text_output_shows_il_column_and_capital_simulation(fake_io, capsy
     # preset ranges have Low confidence (near-zero p_active) alongside a small `il` figure --
     # a user reading `il` alone could mistake that for safety. The clarifying note must appear.
     assert "not by itself a safety signal" in out
+
+
+def test_range_investment_id_now_catches_low_protocol_security_score(fake_io, capsys):
+    # Confirmed live as a real gap: `range --investmentId` used to call pool_risk_flags()
+    # directly instead of evaluate_pool(), with no protocol_security_score ever fetched -- a
+    # pool `scan` would flag and exclude for a disreputable protocol could be looked up here
+    # with zero warning, showing a full range breakdown as if it had cleared the complete
+    # screen. Now it fetches the score too (peer_apys is still skipped -- no market context for
+    # a single-pool lookup -- but this half of the gap is closed).
+    fb, fg = fake_io
+    fg.stock_tokens = [nvda_token()]
+    fb.investment_info["inv1"] = info_entry(
+        "NVDAB-USDT", "PancakeSwap V3", "pancakeswap3",
+        [{"tokenAddress": nvda_token()["contractAddress"], "tokenSymbol": "NVDAB"},
+         {"tokenAddress": USDT_BSC, "tokenSymbol": "USDT"}], apy_bps=3000)
+    fb.protocol_security_score["pancakeswap3"] = 10  # well below the 50 floor
+    fg.klines[("56", nvda_token()["contractAddress"].lower())] = make_price_klines(60, daily_return=0.01)
+
+    args = cli.build_parser().parse_args(["range", "--investmentId", "inv1"])
+    cli.cmd_range(args)
+
+    err = capsys.readouterr().err
+    assert "failed the pre-deposit screen" in err
+    assert "security score" in err
 
 
 def test_range_straddle_omits_narrow_range_caveat_when_nothing_is_low_confidence(fake_io, capsys):
@@ -805,6 +955,42 @@ def test_rebalance_check_names_best_alternative_and_switch_verdict(monkeypatch, 
     assert pos["best_alternative"]["investmentId"] == "alt1"
     assert pos["switching"]["verdict"] == "switch"
     assert pos["needs_attention"] is True
+
+
+def test_rebalance_check_carries_model_apy_caveat_text_and_json(monkeypatch, capsys):
+    # Confirmed live: every other command that shows a model_net_apy-derived number prints
+    # MODEL_APY_CAVEAT alongside DYOR_DISCLAIMER -- rebalance-check used to print only the
+    # latter, in both text and JSON, despite showing held/alternative apy and a dollar
+    # switching-cost estimate. A held position is required here -- an empty positions list
+    # early-returns before ever reaching the caveat-printing code at the end.
+    def fake_fetch_positions():
+        return {"deFiProtocolVOList": [{
+            "protocolName": "PancakeSwap V3", "binanceChainId": "56",
+            "poolList": [{"poolType": "Liquidity Pool", "positionCollectionList": [{"positionList": [{
+                "investmentIds": ["held1"],
+                "positionDetail": {"nftId": "n1"},
+                "tokenList": {"supply": [{"tokenAddress": nvda_token()["contractAddress"],
+                                           "tokenAmount": "100", "tokenValue": "20000"}]},
+            }]}]}],
+        }]}
+    monkeypatch.setattr(market_data, "fetch_positions", fake_fetch_positions)
+    monkeypatch.setattr(market_data, "fetch_stock_tokens", lambda type_filter=None: [nvda_token()])
+    market_results = [{"investmentId": "held1", "stock_ticker": "NVDA", "vol_ratio": 0.9, "apy": 0.10,
+                        "model_net_apy": 0.03, "pool": "NVDAB-USDT", "protocol": "PancakeSwap V3",
+                        "tvl": 20000, "pair_mode": "stablecoin", "grade": "Fair"}]
+    monkeypatch.setattr(scan, "run_scan", lambda **kw: (market_results, [], [], FAKE_FULL_COVERAGE))
+
+    args = cli.build_parser().parse_args(["rebalance-check"])
+    cli.cmd_rebalance_check(args)
+    out = capsys.readouterr().out
+    assert "model estimate" in out  # MODEL_APY_CAVEAT's own leading phrase
+    assert "Always DYOR" in out
+
+    args_json = cli.build_parser().parse_args(["rebalance-check", "--json"])
+    cli.cmd_rebalance_check(args_json)
+    data = json.loads(capsys.readouterr().out)
+    assert "model_apy_caveat" in data
+    assert "dyor_disclaimer" in data
 
 
 # ---- property-style checks (randomized, no hypothesis dependency) ----

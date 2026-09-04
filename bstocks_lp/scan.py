@@ -44,12 +44,23 @@ def _classify_fetch_error(e):
     """Coarse classification of a concurrent-fetch failure (investment-info or kline), for
     unscoreable reasons and failure_summary -- so "N pools failed" doesn't hide whether that's
     a transient timeout/network blip (worth retrying the whole run) or a per-pool data problem
-    (this specific pool is broken, retrying won't help)."""
-    if isinstance(e, (subprocess.TimeoutExpired, TimeoutError)):
+    (this specific pool is broken, retrying won't help).
+
+    Checks `e.__cause__` too, not just `e` itself: api._get wraps every failure -- including a
+    genuine timeout or connection error -- into a plain RuntimeError via `raise RuntimeError(...)
+    from last_error` before it ever reaches here, which set the isinstance checks below to never
+    match a kline-fetch failure at all (RuntimeError isn't a subclass of TimeoutError/URLError/
+    ConnectionError), silently falling through to the generic "error" bucket for the entire
+    kline-fetch path regardless of the real cause. `from ...` sets `__cause__` to the original
+    exception, so checking it recovers the classification `_get`'s wrapping would otherwise
+    throw away. investment-info fetches (via api.baw) aren't affected -- baw() lets
+    subprocess.TimeoutExpired propagate unwrapped -- but checking __cause__ is harmless there too."""
+    cause = e.__cause__
+    if isinstance(e, (subprocess.TimeoutExpired, TimeoutError)) or isinstance(cause, (subprocess.TimeoutExpired, TimeoutError)):
         return "timeout"
-    if isinstance(e, (urllib.error.URLError, ConnectionError)):
+    if isinstance(e, (urllib.error.URLError, ConnectionError)) or isinstance(cause, (urllib.error.URLError, ConnectionError)):
         return "network error"
-    if isinstance(e, ValueError):
+    if isinstance(e, ValueError) or isinstance(cause, ValueError):
         return "invalid data"
     return "error"
 
@@ -67,6 +78,12 @@ def _coverage_note(coverage, max_pages):
     case instead of printing a coverage line every run."""
     if not coverage["truncated"]:
         return None
+    if coverage["pools_total"] is None:
+        return (f"NOTE: scanned {coverage['pools_fetched']} LP pools system-wide "
+                f"(--max-pages {max_pages}) -- the API didn't report a total count this run, so "
+                f"whether more exist beyond this depth can't be confirmed (lower-apy pools sort "
+                f"last, so these are unlikely to be the best pick, but they'd be unscanned, not "
+                f"screened out). Raise --max-pages to cover more of them.")
     missed = coverage["pools_total"] - coverage["pools_fetched"]
     return (f"NOTE: scanned {coverage['pools_fetched']}/{coverage['pools_total']} LP pools "
             f"system-wide (--max-pages {max_pages}) -- {missed} more exist beyond this depth "
@@ -135,8 +152,14 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
 
     log("fetching LP pools (requires signed-in baw session)...")
     pools, pools_total = market_data.fetch_lp_investments(max_pages=max_pages)
-    coverage = {"pools_fetched": len(pools), "pools_total": pools_total,
-                "truncated": len(pools) < pools_total}
+    # pools_total is None when the API omitted the total count -- coverage can't be verified in
+    # that case, so fall back to "did we hit the max_pages cap with a full last page" (the same
+    # signal used before pools_total existed) instead of a false "not truncated".
+    if pools_total is not None:
+        truncated = len(pools) < pools_total
+    else:
+        truncated = len(pools) >= max_pages * 100
+    coverage = {"pools_fetched": len(pools), "pools_total": pools_total, "truncated": truncated}
 
     ticker_by_ticker = {t["ticker"].lower(): t for t in stock_tokens}
     candidates = []
@@ -258,14 +281,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
             unscoreable.append((pool.get("investmentName"), f"could not compute volatility ({reason})"))
             continue
 
-        # `investment-list`'s `apy` is null/0 for most concentrated (V3) LP pools;
-        # `investment-info` carries the real fee-based rate as `apyBps` instead.
-        if info.get("apy") is not None:
-            apy = float(info["apy"])
-        elif info.get("apyBps") is not None:
-            apy = float(info["apyBps"]) / 10000
-        else:
-            apy = float(pool.get("apy") or 0)
+        apy = market_data.resolve_pool_apy(pool, info)
 
         prepared.append({"pool": pool, "info": info, "stock": stock, "sigma": sigma, "apy": apy,
                           "pair_mode": pair_mode})
@@ -287,7 +303,13 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
     distinct_protocol_ids = {pid for pid in
                               (p["pool"].get("defiProtocolId") or p["info"].get("defiProtocolId") for p in prepared)
                               if pid}
+    # Track fetch failures separately from a genuinely-absent score. fetch_protocol_security_score
+    # now raises on a real failure instead of returning None for it (see its docstring) --
+    # collapsing that back into security_score_cache[pid] = None here would silently disable the
+    # security-score floor for every pool on that protocol (pool_risk_flags treats None as
+    # "nothing to check", not "failed"), on nothing worse than a transient network blip.
     security_score_cache: dict[str, float | None] = {}
+    security_score_fetch_failed: set[str] = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_BAW_CALLS) as score_executor:
         future_to_pid = {score_executor.submit(market_data.fetch_protocol_security_score, pid, {}): pid
                           for pid in distinct_protocol_ids}
@@ -297,6 +319,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
                 security_score_cache[pid] = future.result()
             except Exception:
                 security_score_cache[pid] = None
+                security_score_fetch_failed.add(pid)
 
     results = []
     flagged = []
@@ -305,13 +328,27 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
         protocol_id = pool.get("defiProtocolId") or info.get("defiProtocolId")
         security_score = security_score_cache.get(protocol_id) if protocol_id else None
         peer_apys = [a for inv_id, a in entries_by_ticker.get(stock["ticker"], []) if inv_id != pool["investmentId"]]
-        evaluation = risk_screen.evaluate_pool(
-            pool, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
-            max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
-            peer_outlier_multiple=peer_outlier_multiple,
-            min_peer_sample_size=min_peer_sample_size,
-            min_security_score=min_security_score,
-            block_unknown_v4_hooks=block_unknown_v4_hooks)
+        try:
+            evaluation = risk_screen.evaluate_pool(
+                pool, info, sigma, apy, peer_apys=peer_apys, protocol_security_score=security_score,
+                max_fee_rate=max_fee_rate, min_tvl_usd=min_tvl,
+                peer_outlier_multiple=peer_outlier_multiple,
+                min_peer_sample_size=min_peer_sample_size,
+                min_security_score=min_security_score,
+                block_unknown_v4_hooks=block_unknown_v4_hooks)
+        except (TypeError, ValueError) as e:
+            # A single pool's malformed tvl/apy/feeRate field (a non-numeric string, say) used
+            # to raise uncaught here and abort Pass 2 for every pool in the batch -- not just
+            # this one -- surfacing at cmd_scan's top level as a misleading "could not fetch LP
+            # pools" auth-session error. Route it the same way Pass 1 already routes a bad
+            # single pool: unscoreable, continue with the rest.
+            unscoreable.append((pool.get("investmentName"), f"could not evaluate risk screen ({e})"))
+            continue
+        if protocol_id in security_score_fetch_failed:
+            evaluation["flags"].append(
+                f"protocol security score for {protocol_id!r} could not be fetched (network/API "
+                f"error, not a real 0-100 result) -- treat as unverified, not as passing the "
+                f"security-score floor")
         if evaluation["flags"]:
             flagged.append({"investmentId": pool.get("investmentId"), "pool": pool.get("investmentName"),
                              "protocol": pool.get("protocolName"), "flags": evaluation["flags"],
@@ -336,7 +373,7 @@ def run_scan(max_pages=3, max_fee_rate=risk_screen.MAX_SANE_FEE_RATE, min_tvl=ri
             "pool": pool.get("investmentName"),
             "investmentId": pool.get("investmentId"),
             "stock_ticker": stock["ticker"],
-            "tvl": float(pool.get("tvl") or 0),
+            "tvl": market_data.resolve_pool_tvl(pool, info),
             "grade": il_model.richness_grade(scored["vol_ratio"]),
             "verdict": classify_verdict(scored),
             "pair_mode": p["pair_mode"],

@@ -19,6 +19,7 @@ from bstocks_lp.cli import (
     _nonneg_float,
     _offset_fraction,
     _peer_apys_for_ticker,
+    _positive_band_width,
     _positive_int,
     _switching_recommendation,
     _v4_override_reason,
@@ -37,7 +38,11 @@ from bstocks_lp.il_model import (
     risk_adjusted_apy,
     vol_richness_ratio,
 )
-from bstocks_lp.market_data import resolve_pool_stock_and_quote
+from bstocks_lp.market_data import (
+    resolve_pool_apy,
+    resolve_pool_stock_and_quote,
+    resolve_pool_tvl,
+)
 from bstocks_lp.range_model import (
     _exact_double_barrier_no_exit_probability,
     _single_barrier_touch_probability,
@@ -52,6 +57,7 @@ from bstocks_lp.risk_screen import evaluate_pool, pool_risk_flags
 from bstocks_lp.scan import (
     VERDICT_ENTER,
     VERDICT_WATCH,
+    _classify_fetch_error,
     _summarize_unscoreable,
     classify_verdict,
     passes_trade_gate,
@@ -325,34 +331,34 @@ def test_recommend_range_never_recommends_the_unscoreable_full_range_row():
 def test_pool_risk_flags_clean_pool_has_no_flags():
     pool = {"tvl": "50000"}
     info = {"feeRate": "0.003", "tvl": "50000", "apy": "0.5", "investable": True}
-    assert pool_risk_flags(pool, info) == []
+    assert pool_risk_flags(pool, info, 0.5) == []
 
 
 def test_pool_risk_flags_catches_extreme_fee_rate():
     pool = {"tvl": "271479"}
     info = {"feeRate": "8.38861", "tvl": "271479", "apyBps": "165877"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 16.5877)
     assert any("feeRate" in f for f in flags)
 
 
 def test_pool_risk_flags_catches_low_tvl():
     pool = {"tvl": "100"}
     info = {"feeRate": "0.003", "tvl": "100", "apy": "0.2"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.2)
     assert any("TVL" in f for f in flags)
 
 
 def test_pool_risk_flags_catches_delisted_product():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "0.2", "investable": False}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.2)
     assert any("delisted" in f for f in flags)
 
 
 def test_pool_risk_flags_catches_low_protocol_security_score():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "0.2"}
-    flags = pool_risk_flags(pool, info, protocol_security_score=30)
+    flags = pool_risk_flags(pool, info, 0.2, protocol_security_score=30)
     assert any("security score" in f for f in flags)
 
 
@@ -360,7 +366,7 @@ def test_pool_risk_flags_catches_peer_outlier():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "1.0"}  # 100% apy
     peers = [0.10, 0.12, 0.11]  # peer median 11%, this pool is ~9x that
-    flags = pool_risk_flags(pool, info, peer_apys=peers)
+    flags = pool_risk_flags(pool, info, 1.0, peer_apys=peers)
     assert any("outlier" in f for f in flags)
 
 
@@ -371,10 +377,10 @@ def test_pool_risk_flags_skips_peer_outlier_below_min_sample_size():
     # pool's feeRate/TVL/incentive data showed no actual defect (see risk_screen.py).
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "1.0"}
-    assert pool_risk_flags(pool, info, peer_apys=[0.10]) == []
-    assert pool_risk_flags(pool, info, peer_apys=[0.10, 0.12]) == []
+    assert pool_risk_flags(pool, info, 1.0, peer_apys=[0.10]) == []
+    assert pool_risk_flags(pool, info, 1.0, peer_apys=[0.10, 0.12]) == []
     # but three-or-more peers is enough for the check to apply again
-    flags = pool_risk_flags(pool, info, peer_apys=[0.10, 0.12, 0.11])
+    flags = pool_risk_flags(pool, info, 1.0, peer_apys=[0.10, 0.12, 0.11])
     assert any("outlier" in f for f in flags)
 
 
@@ -382,7 +388,7 @@ def test_pool_risk_flags_does_not_flag_within_peer_range():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "0.15"}
     peers = [0.10, 0.12, 0.18]
-    assert pool_risk_flags(pool, info, peer_apys=peers) == []
+    assert pool_risk_flags(pool, info, 0.15, peer_apys=peers) == []
 
 
 def test_pool_risk_flags_peer_check_excludes_self_by_construction():
@@ -393,8 +399,23 @@ def test_pool_risk_flags_peer_check_excludes_self_by_construction():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "0.5"}
     peers_including_self = [0.5, 0.5, 0.5]
-    flags = pool_risk_flags(pool, info, peer_apys=peers_including_self)
+    flags = pool_risk_flags(pool, info, 0.5, peer_apys=peers_including_self)
     assert flags == []  # median == apy, not an outlier either way
+
+
+def test_pool_risk_flags_uses_the_passed_apy_not_a_recompute_from_info_alone():
+    # Confirmed live: pool_risk_flags used to re-derive apy from `info` alone (a narrower
+    # 2-tier fallback than resolve_pool_apy's 3-tier chain), so a pool whose `info` carried
+    # neither `apy` nor `apyBps` silently scored apy=0.0 internally here -- the peer-outlier
+    # check could never fire for such a pool no matter how far outside the peer range its real
+    # (pool-level) apy actually was. `info` below deliberately has neither field; the real apy
+    # (an outlier vs. peers) is only knowable from `pool`, exactly resolve_pool_apy's 3rd tier.
+    pool = {"tvl": "50000", "apy": "1.0"}
+    info = {"tvl": "50000"}  # no apy, no apyBps
+    peers = [0.10, 0.12, 0.11]  # median 11%; the real apy (1.0) is ~9x that
+    apy = resolve_pool_apy(pool, info)
+    flags = pool_risk_flags(pool, info, apy, peer_apys=peers)
+    assert any("outlier" in f for f in flags)
 
 
 # ---- is_stablecoin ----
@@ -523,6 +544,40 @@ def test_relative_volatility_none_when_coverage_too_sparse():
     assert "coverage" in result["reason"]
 
 
+# ---- resolve_pool_apy / resolve_pool_tvl ----
+
+def test_resolve_pool_apy_prefers_info_apy():
+    assert resolve_pool_apy({"apy": "9.9"}, {"apy": "0.5"}) == 0.5
+
+
+def test_resolve_pool_apy_falls_back_to_apy_bps():
+    assert resolve_pool_apy({}, {"apyBps": "3000"}) == 0.3
+
+
+def test_resolve_pool_apy_falls_back_to_pool_apy_when_info_has_neither():
+    # Confirmed live as a real divergence bug: pool_risk_flags used to re-derive apy from
+    # `info` alone (missing this third tier), so a pool whose info carried neither apy nor
+    # apyBps would silently score apy=0.0 in the peer-outlier check while every other reading
+    # of the same pool (via this function) found the real value from `pool`.
+    assert resolve_pool_apy({"apy": "0.42"}, {}) == pytest.approx(0.42)
+
+
+def test_resolve_pool_apy_defaults_to_zero_when_nothing_available():
+    assert resolve_pool_apy({}, {}) == 0.0
+
+
+def test_resolve_pool_tvl_prefers_pool_tvl():
+    assert resolve_pool_tvl({"tvl": "100"}, {"tvl": "200"}) == 100.0
+
+
+def test_resolve_pool_tvl_falls_back_to_info_tvl():
+    assert resolve_pool_tvl({}, {"tvl": "200"}) == 200.0
+
+
+def test_resolve_pool_tvl_defaults_to_zero_when_neither_available():
+    assert resolve_pool_tvl({}, {}) == 0.0
+
+
 # ---- resolve_pool_stock_and_quote ----
 
 STOCK_INDEX = {
@@ -609,27 +664,27 @@ def test_resolve_pool_stock_and_quote_duplicate_address_unsupported():
 def test_pool_risk_flags_blocks_v4_by_default():
     pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.5)
     assert any("V4" in f for f in flags)
 
 
 def test_pool_risk_flags_v4_block_is_case_insensitive_and_checks_info_too():
     pool = {"tvl": "50000"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003", "protocolName": "uniswap v4"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.5)
     assert any("v4" in f.lower() for f in flags)
 
 
 def test_pool_risk_flags_v3_not_blocked():
     pool = {"tvl": "50000", "protocolName": "Uniswap V3"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    assert pool_risk_flags(pool, info) == []
+    assert pool_risk_flags(pool, info, 0.5) == []
 
 
 def test_pool_risk_flags_v4_override_disables_block():
     pool = {"tvl": "50000", "protocolName": "Uniswap V4"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    flags = pool_risk_flags(pool, info, block_unknown_v4_hooks=False)
+    flags = pool_risk_flags(pool, info, 0.5, block_unknown_v4_hooks=False)
     assert flags == []
 
 
@@ -639,21 +694,21 @@ def test_pool_risk_flags_blocks_v4_by_defi_protocol_id_even_without_v4_in_name()
     # defiProtocolId="pancakeswap4", protocolName="PancakeSwap Infinity", real pools on BSC).
     pool = {"tvl": "50000", "protocolName": "PancakeSwap Infinity", "defiProtocolId": "pancakeswap4"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.5)
     assert any("V4-generation" in f for f in flags)
 
 
 def test_pool_risk_flags_v3_not_blocked_by_defi_protocol_id():
     pool = {"tvl": "50000", "protocolName": "PancakeSwap V3", "defiProtocolId": "pancakeswap3"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    assert pool_risk_flags(pool, info) == []
+    assert pool_risk_flags(pool, info, 0.5) == []
 
 
 def test_pool_risk_flags_falls_back_to_name_match_without_defi_protocol_id():
     # no defiProtocolId at all -- must not silently disable the check
     pool = {"tvl": "50000", "protocolName": "Some New V4 Fork"}
     info = {"tvl": "50000", "apy": "0.5", "feeRate": "0.003"}
-    flags = pool_risk_flags(pool, info)
+    flags = pool_risk_flags(pool, info, 0.5)
     assert any("V4-generation" in f for f in flags)
 
 
@@ -751,6 +806,30 @@ def test_switching_recommendation_stay_when_payback_too_slow():
     result = _switching_recommendation(position_usd=10, held_model_net_apy=0.05, alt_model_net_apy=0.06)
     assert result["verdict"] == "stay"
     assert result["payback_days"] > SWITCH_PAYBACK_DAYS_WORTHWHILE
+
+
+# ---- _classify_fetch_error ----
+
+def test_classify_fetch_error_checks_cause_not_just_the_wrapper():
+    # Confirmed live: api._get wraps every failure -- including a genuine timeout or connection
+    # error -- into a plain RuntimeError via `raise RuntimeError(...) from last_error` before it
+    # reaches this classifier. Since RuntimeError isn't a subclass of TimeoutError/URLError/
+    # ConnectionError, the isinstance checks against `e` alone never matched a kline-fetch
+    # failure -- this locks in that `__cause__` (set by `raise ... from ...`) is checked too.
+    import urllib.error
+
+    try:
+        raise RuntimeError("wrapped") from TimeoutError("timed out")
+    except RuntimeError as wrapped:
+        assert _classify_fetch_error(wrapped) == "timeout"
+
+    try:
+        raise RuntimeError("wrapped") from urllib.error.URLError("network unreachable")
+    except RuntimeError as wrapped:
+        assert _classify_fetch_error(wrapped) == "network error"
+
+    # a RuntimeError with no informative cause still falls through to the generic bucket
+    assert _classify_fetch_error(RuntimeError("something else")) == "error"
 
 
 # ---- _summarize_unscoreable (failure_summary for run_scan's concurrent fetch handling) ----
@@ -898,6 +977,21 @@ def test_offset_fraction_rejects_price_crushing_offset():
 def test_offset_fraction_accepts_normal_range():
     assert _offset_fraction("0.15") == 0.15
     assert _offset_fraction("-0.5") == -0.5
+
+
+def test_positive_band_width_rejects_negative_and_zero():
+    # Confirmed live: --band-width used _offset_fraction (which allows negative, like
+    # --target-offset legitimately can) -- a negative --band-width let range_model.range_metrics
+    # see pb <= pa several calls deeper and crash with an unhandled ValueError instead of a
+    # clean argparse error at the CLI boundary. A band's width is a magnitude, never negative.
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_band_width("-0.2")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_band_width("0")
+
+
+def test_positive_band_width_accepts_normal_range():
+    assert _positive_band_width("0.1") == 0.1
 
 
 # ---- _v4_override_reason (--allow-v4 requires a recorded reason, not a bare flag) ----
