@@ -287,6 +287,18 @@ house style):
   bubble = more capital the pool can absorb before your deposit moves it),
   color = grade/verdict (green for Rich/`ENTER`, amber for Fair/`WATCH`,
   red for Cheap — never a single uniform color across every bubble).
+  **`model_net_apy` here means each pool's plain (full-range) figure, not
+  `best_range.model_net_apy`** — confirmed live as a real source of
+  confusion, not a style nit: `cmd_recommend`'s headline and `scan
+  --with-range`'s `range-net` column both quote the *concentrated-range*
+  number, which is routinely 30-100%+ higher than the same pool's
+  full-range figure (concentration multiplies both fee income and IL).
+  Plotting one pool's full-range value next to another's range-optimized
+  one on the same axis — or switching which one a chart uses between two
+  charts of "the same" scan without saying so — reads as the data having
+  changed when it hasn't. Pick one metric, name it in the axis title
+  (`model net APY, full-range` vs `model net APY, recommended range`), and
+  don't mix them on one chart.
   Label the x-axis "vol_ratio (lower = richer/cheaper)" explicitly, and
   add a vertical reference line at `vol_ratio = 1.0` marking the
   `ENTER`/`WATCH` boundary. **Use a log scale on the x-axis** whenever the
@@ -311,6 +323,36 @@ house style):
   bar chart whose length alone implies "bigger is better" for a metric
   where lower is what's good.
 
+**Set both axes' bounds from the actual data range each time, never a
+fixed number carried over from a previous chart.** `model_net_apy` swings
+by an order of magnitude between scans depending on what the market is
+doing — one real run topped out under 600%, another (same code, a few
+hours later, one volatile pool) topped 1,300%. A hardcoded y-axis max
+that fit the first run clips every point above it in the second, silently
+— the chart looks fine, it's just wrong. Compute `[min, max]` (or, for the
+log x-axis, `[floor, ceil]` in log-space) from the actual rows being
+plotted, pad by roughly 10%, and include 0 in a `model_net_apy` axis's
+range only if some row is actually negative or you specifically want the
+breakeven line visible — don't assume the padding a past chart used still
+fits.
+
+**If a script or widget computes point positions and label rows itself,
+verify the numbers before the chart is shown, not after a user reports
+something clipped or overlapping.** This is the difference between two
+real failures traced to the same root cause this session: a label at the
+top of a densely-packed chart got shifted off the top of the canvas by a
+label-collision fix that only checked the bottom edge, and separately, a
+bubble chart's y-axis (hardcoded, see above) clipped the highest point
+entirely. Neither was visible to the agent that shipped it — only to the
+user, after the fact. Prefer computing coordinates and label rows ahead
+of render time (e.g. in the same step that builds the chart's data) and
+asserting there — every point's `(x, y)` inside the plot bounds, every
+stacked label's row inside `[top, bottom]` with the minimum gap enforced
+in *both* directions, not just top-to-bottom — over trusting a charting
+library's runtime layout for something this session couldn't preview
+before the user saw it. A static SVG built from pre-checked coordinates
+is easier to get right than JS that lays itself out in the browser.
+
 **Every point needs a visible identity, not just a hover tooltip — and a
 label with no leader line is still ambiguous in a dense cluster.** A chart
 where you can't tell which point is which pool without hovering fails the
@@ -330,10 +372,20 @@ The fix that actually holds up on real (not hand-picked) data: don't
 search for room near the point at all — stack the labels in a single
 column in the chart's open margin (e.g. to the right of the plot area),
 sorted top-to-bottom by each point's natural vertical position, with a
-minimum row gap enforced by a greedy pass (`finalY = max(naturalY,
-previousLabel.finalY + rowGap)`, then shift the whole stack up if it ran
-past the bottom edge). This *guarantees* zero label-label overlap by
-construction, regardless of how dense the underlying cluster is — the
+minimum row gap enforced by a greedy forward pass (`finalY = max(naturalY,
+previousLabel.finalY + rowGap)`). **That forward pass alone isn't enough
+— it only pushes labels down, so it can push the last one past the bottom
+edge, and naively shifting the *whole* stack up to fix that then pushes
+early, already-fine labels off the *top* edge instead** (confirmed live:
+a top label vanished off-canvas from exactly this asymmetric fix). Do a
+second, backward pass instead: clamp the last label to the bottom bound,
+then walk back up enforcing `finalY[i] = min(finalY[i], finalY[i+1] -
+rowGap)`; only after that, clamp the first label to the top bound and
+re-run the forward pass once more if needed. Assert both directions hold
+(every gap ≥ `rowGap`, every `finalY` inside `[top, bottom]`) before
+drawing — see the note above on verifying coordinates ahead of render
+time. This *guarantees* zero label-label overlap by construction,
+regardless of how dense the underlying cluster is — the
 trade-off is a longer leader line for points whose natural position is far
 from their assigned row, which is the right trade: a long unambiguous line
 beats a short ambiguous one every time. Draw a plain leader line (thin,
