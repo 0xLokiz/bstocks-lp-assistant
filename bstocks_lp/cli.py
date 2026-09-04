@@ -155,13 +155,13 @@ def cmd_scan(args):
         return
 
     if args.with_range:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'grade':>7}"
+        print(f"\n{'pool':<20}{'ticker':<8}{'protocol':<16}{'apy':>9}{'vol':>9}{'grade':>7}"
               f"{'best +/-%':>10}{'range-net':>11}{'confidence':>12}{'tvl':>14}  verdict")
         for r in results[: args.top]:
             b = r["best_range"]
             width = f"{(b['pb']-1)*100:.0f}%" if b["pb"] is not None else "full"
             tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
-            print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
+            print(f"{r['pool']:<20}{r['stock_ticker']:<8}{(r.get('protocol') or '?'):<16}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%{r['grade']:>7}"
                   f"{width:>10}{b['model_net_apy']*100:>10.2f}%{b['confidence']:>12}"
                   f"{r['tvl']:>14,.0f}  {r['verdict']}{tag}")
@@ -170,12 +170,16 @@ def cmd_scan(args):
               "bucketed High/Moderate/Low. verdict = ENTER (clears the trade gate) or WATCH "
               "(safe but not attractive right now). [non-stablecoin pair] = vol is the "
               "*relative* vol between the two pooled assets, not the bStock alone -- see "
-              "README. Full numbers: --json.)")
+              "README. protocol is shown for every row, not just when it's a hook-risk "
+              "concern -- every row here already cleared the V4 hard block unless you passed "
+              "--allow-v4, in which case an overridden pool's protocol name is your only "
+              "in-table signal that it's the one you took on that risk for. Full numbers: "
+              "--json.)")
     else:
-        print(f"\n{'pool':<20}{'ticker':<8}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}  verdict")
+        print(f"\n{'pool':<20}{'ticker':<8}{'protocol':<16}{'apy':>9}{'vol':>9}{'net_apy':>10}{'grade':>7}{'tvl':>14}  verdict")
         for r in results[: args.top]:
             tag = "" if r["pair_mode"] == "stablecoin" else "  [non-stablecoin pair]"
-            print(f"{r['pool']:<20}{r['stock_ticker']:<8}"
+            print(f"{r['pool']:<20}{r['stock_ticker']:<8}{(r.get('protocol') or '?'):<16}"
                   f"{r['apy']*100:>8.2f}%{r['sigma_annual']*100:>8.2f}%"
                   f"{r['model_net_apy']*100:>9.2f}%{r['grade']:>7}"
                   f"{r['tvl']:>14,.0f}  {r['verdict']}{tag}")
@@ -429,10 +433,11 @@ def cmd_recommend(args):
     # "593.97%" for that identical row, with nothing distinguishing the two numbers -- a reader
     # (human or another agent) has no way to tell those are different metrics (concentrated-range
     # vs full-range baseline) rather than a contradiction or a bug.
-    print(f"{'pool':<20}{'ticker':<8}{'grade':>7}{'range_apy':>11}{'tvl':>14}  verdict")
+    print(f"{'pool':<20}{'ticker':<8}{'protocol':<16}{'grade':>7}{'range_apy':>11}{'tvl':>14}  verdict")
     for r in results[:3]:
         rb = r["best_range"]
-        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{r['grade']:>7}{rb['model_net_apy']*100:>10.2f}%{r['tvl']:>14,.0f}  {r['verdict']}")
+        print(f"{r['pool']:<20}{r['stock_ticker']:<8}{(r.get('protocol') or '?'):<16}{r['grade']:>7}"
+              f"{rb['model_net_apy']*100:>10.2f}%{r['tvl']:>14,.0f}  {r['verdict']}")
 
     if watch_list:
         print(f"\n{len(watch_list)} more pool(s) are {scan.VERDICT_WATCH} -- safe, but don't currently clear the "

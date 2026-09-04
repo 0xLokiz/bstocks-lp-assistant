@@ -494,27 +494,32 @@ preview` → 跟用户确认 → `defi deposit` / `defi lp-add` / `defi redeem` 
 ## 运行状态
 
 已经跑通完整流程，针对真实的 `baw` 会话验证过。真实输出
-（`python riskscreen.py scan --top 8 --with-range`，BSC，2026-09-02）：
+（`python riskscreen.py scan --top 8 --with-range`，BSC，2026-09-03）：
 
 ```
-pool                ticker        apy      vol  grade best +/-%  range-net  confidence           tvl
-GMEB-USDT           GME       426.06%   23.81%   Rich       50%    913.40%        High        19,848
-AAPLB-USDT          AAPL      364.19%   32.57%   Rich       50%    646.12%    Moderate        54,040
-GMEB-USDT           GME       256.48%   23.81%   Rich       50%    549.18%        High       136,619
-AAPLB-USDT          AAPL      219.90%   32.57%   Rich       50%    388.89%    Moderate       441,293
-NVDAB-BNB           NVDA      125.82%   39.59%   Rich       50%    178.25%    Moderate        42,924
-BNB-SPCXB           SPCX      125.87%   82.78%   Rich      full    117.30%        High     1,303,516
-HOODB-BNB           HOOD      123.21%   71.84%   Rich      full    116.76%        High        17,299
-NVDAB-USDT          NVDA      104.17%   39.59%   Rich       50%    146.78%    Moderate        67,397
+pool                ticker  protocol              apy      vol  grade best +/-%  range-net  confidence           tvl  verdict
+GMEB-USDT           GME     PancakeSwap V3    784.16%   40.46%   Rich       90%    900.37%        High       132,769  ENTER
+USDT-MRNAB          MRNA    PancakeSwap V3    802.94%  158.96%   Rich      full    771.36%        High       133,819  ENTER
+NVDAB-BNB           NVDA    PancakeSwap V3    385.75%   43.87%   Rich       90%    425.66%        High        63,226  ENTER  [non-stablecoin pair]
+QQQB-BNB            QQQ     PancakeSwap V3    228.39%   30.08%   Rich       50%    430.19%        High        59,824  ENTER  [non-stablecoin pair]
+NVDAB-USDT          NVDA    PancakeSwap V3    223.55%   50.12%   Rich       90%    227.91%    Moderate     2,064,242  ENTER
+NVDAB-USDT          NVDA    PancakeSwap V3    213.27%   50.12%   Rich       90%    217.24%    Moderate       467,527  ENTER
+USDT-SPCXB          SPCX    PancakeSwap V3    189.34%  100.60%   Rich      full    176.69%        High       308,724  ENTER
+HOODB-BNB           HOOD    PancakeSwap V3    166.57%   69.80%   Rich      full    160.48%        High        17,838  ENTER  [non-stablecoin pair]
 
-1 pool(s) excluded from ranking -- anomalous feeRate:
-  QQQB-USDC (Uniswap V4): feeRate=838.86% per swap outside a sane range, and apy is
-  21.3x the peer median -- see "Pre-deposit risk & plausibility screen"
+5 pool(s) excluded from ranking -- pre-deposit screen flagged, e.g.:
+  GMEB-USDT (Uniswap V4): V4-generation pools can carry an arbitrary custom
+  hook with unaudited logic -- blocked by default (--allow-v4 to override)
+  BNB-SPCXB (PancakeSwap V3): apy is 5.6x the median (106.4%) of other pools
+  on the same token -- outlier, treat as unverified until explained
 ```
 
-这8个上榜的池子全部评级为 **Rich**——高得吓人的APY确实反映了相对于已实现
-波动率的可观溢价，不只是数字看起来很大而已。被排除的第九名（QQQB-USDC，
-Uniswap V4）说明合理性过滤器在正常工作，不是排名漏掉了它。
+这8个上榜的池子全部评级为 **Rich**，也都通过了 **ENTER**——高得吓人的APY
+确实反映了相对于已实现波动率的可观溢价，不只是数字看起来很大而已。
+`protocol` 列能看出每一个上榜池子都已经通过了V4硬拦截（见下文）；被排除的
+5个池子说明合理性过滤器在正常工作，不是排名漏掉了它们——其中就包括
+GMEB-USDT 在 Uniswap V4 上的姊妹池，跟上面排第一的 PancakeSwap V3 池子是
+同一个标的，但因为合约风险被排除在外。
 
 NVDAB-USDT 的区间扫描（`range --investmentId 9c97dee1...d405de7ec7f79d`）：
 Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，置信
@@ -606,6 +611,19 @@ Richness Score 评级 **Rich**（`vol_ratio` 0.18）。满区间净APY 59.18%，
   一个这个无状态CLI脚本现在还没有的持久化层；值得认真设计而不是随手拼
   一个上去，而且跟下面的历史校准这一项关系密切（一个快照存储基本上就
   是纸面交易harness需要的大部分东西，可以拿来回放）。
+
+### 最近完成的（表格里看不出池子在哪个协议上）
+
+用户看了一张跟这个项目无关的截图后直接提出的问题——那张表格里没有任何一
+行能看出是PancakeSwap还是Uniswap、V3还是V4。底层数据其实早就有了（`scan`/
+`recommend` 的JSON结果里每一行都带`protocol`字段），只是文字表格从来没打
+印出来。给 `scan`（`--with-range` 和普通两种）和 `recommend` 都加了
+`protocol` 列。这不只是好奇心的问题：因为V4系列池子默认会被排除出
+`results`（除非传了`--allow-v4`），所以表格里每一行本来就已经通过了V4硬
+拦截——一旦用了覆盖参数，protocol列就是表格里**唯一**能看出到底是哪一行
+承担了这个风险的信号。下面"运行状态"那节的真实输出示例也一并刷新了（顺
+带把之前加的`verdict`列也补上——那个快照跟实际输出的格式已经不是第一次
+对不上了）。
 
 ### 最近完成的（recommend的标题和表格里两个净收益数字对不上）
 

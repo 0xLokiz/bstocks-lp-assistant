@@ -579,28 +579,33 @@ of any of these fetches run at once.
 ## Status
 
 Validated end-to-end against a live `baw` session. Live output
-(`python riskscreen.py scan --top 8 --with-range`, BSC, 2026-09-02):
+(`python riskscreen.py scan --top 8 --with-range`, BSC, 2026-09-03):
 
 ```
-pool                ticker        apy      vol  grade best +/-%  range-net  confidence           tvl
-GMEB-USDT           GME       426.06%   23.81%   Rich       50%    913.40%        High        19,848
-AAPLB-USDT          AAPL      364.19%   32.57%   Rich       50%    646.12%    Moderate        54,040
-GMEB-USDT           GME       256.48%   23.81%   Rich       50%    549.18%        High       136,619
-AAPLB-USDT          AAPL      219.90%   32.57%   Rich       50%    388.89%    Moderate       441,293
-NVDAB-BNB           NVDA      125.82%   39.59%   Rich       50%    178.25%    Moderate        42,924
-BNB-SPCXB           SPCX      125.87%   82.78%   Rich      full    117.30%        High     1,303,516
-HOODB-BNB           HOOD      123.21%   71.84%   Rich      full    116.76%        High        17,299
-NVDAB-USDT          NVDA      104.17%   39.59%   Rich       50%    146.78%    Moderate        67,397
+pool                ticker  protocol              apy      vol  grade best +/-%  range-net  confidence           tvl  verdict
+GMEB-USDT           GME     PancakeSwap V3    784.16%   40.46%   Rich       90%    900.37%        High       132,769  ENTER
+USDT-MRNAB          MRNA    PancakeSwap V3    802.94%  158.96%   Rich      full    771.36%        High       133,819  ENTER
+NVDAB-BNB           NVDA    PancakeSwap V3    385.75%   43.87%   Rich       90%    425.66%        High        63,226  ENTER  [non-stablecoin pair]
+QQQB-BNB            QQQ     PancakeSwap V3    228.39%   30.08%   Rich       50%    430.19%        High        59,824  ENTER  [non-stablecoin pair]
+NVDAB-USDT          NVDA    PancakeSwap V3    223.55%   50.12%   Rich       90%    227.91%    Moderate     2,064,242  ENTER
+NVDAB-USDT          NVDA    PancakeSwap V3    213.27%   50.12%   Rich       90%    217.24%    Moderate       467,527  ENTER
+USDT-SPCXB          SPCX    PancakeSwap V3    189.34%  100.60%   Rich      full    176.69%        High       308,724  ENTER
+HOODB-BNB           HOOD    PancakeSwap V3    166.57%   69.80%   Rich      full    160.48%        High        17,838  ENTER  [non-stablecoin pair]
 
-1 pool(s) excluded from ranking -- anomalous feeRate:
-  QQQB-USDC (Uniswap V4): feeRate=838.86% per swap outside a sane range, and apy is
-  21.3x the peer median -- see "Pre-deposit risk & plausibility screen"
+5 pool(s) excluded from ranking -- pre-deposit screen flagged, e.g.:
+  GMEB-USDT (Uniswap V4): V4-generation pools can carry an arbitrary custom
+  hook with unaudited logic -- blocked by default (--allow-v4 to override)
+  BNB-SPCXB (PancakeSwap V3): apy is 5.6x the median (106.4%) of other pools
+  on the same token -- outlier, treat as unverified until explained
 ```
 
-All eight ranked pools grade **Rich** — the headline APYs genuinely reflect
-a large premium over realized volatility, not just large-looking raw
-numbers. The excluded ninth (QQQB-USDC, Uniswap V4) shows the sanity filter
-working, not the ranking failing to find it.
+All eight ranked pools grade **Rich** and clear **ENTER** — the headline
+APYs genuinely reflect a large premium over realized volatility, not just
+large-looking raw numbers. The `protocol` column shows every pool already
+cleared the V4 hard block (see below); the five excluded pools show the
+sanity filters working, not the ranking failing to find them — including
+GMEB-USDT's Uniswap V4 sibling of the top-ranked PancakeSwap V3 pool above,
+excluded on contract risk even though it's the same underlying stock.
 
 Range sweep for NVDAB-USDT (`range --investmentId 9c97dee1...d405de7ec7f79d`):
 Richness Score **Rich** (`vol_ratio` 0.18). Full-range nets 59.18% APY at
@@ -717,6 +722,22 @@ already built.
   and closely related to the historical-calibration item below (a snapshot
   store is most of what a paper-trading harness would need to replay
   against anyway).
+
+### Recently shipped (which protocol a pool is on wasn't shown anywhere)
+
+Asked directly after a screenshot from unrelated output showed a ranked
+pool table with no way to tell PancakeSwap from Uniswap, V3 from V4, for
+any row. The underlying data was already there (`protocol` on every
+`scan`/`recommend` JSON result) but never printed in the text tables.
+Added a `protocol` column to `scan` (both `--with-range` and plain) and
+`recommend`. It matters beyond curiosity: every row already cleared the
+V4 hard block by construction (V4-generation pools are excluded from
+`results` unless `--allow-v4` overrides it) -- so under an override, the
+protocol column is the *only* in-table signal for which specific row is
+the one that risk was taken on for. The `Status` section's live example
+output below is refreshed to match (with `verdict`, added earlier, too --
+that snapshot had drifted out of sync with actual output shape more than
+once now).
 
 ### Recently shipped (recommend's headline and table quietly disagreed on net APY)
 
