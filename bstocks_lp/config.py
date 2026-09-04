@@ -20,18 +20,16 @@ MAX_CONCURRENT_BAW_CALLS = 8
 SCHEMA_VERSION = "1.0"
 
 # Requested directly, after a real session that found and fixed two genuine calculation bugs
-# in one sitting (see README "Recently shipped"): every command that produces a risk/yield
-# judgment (scan, range, recommend, rebalance-check) must say, every time, that this tool's
-# output is a model's estimate from actively-developed code, not a verified fact -- distinct
-# from MODEL_APY_CAVEAT (il_model.py), which explains why one specific number can be wrong;
-# this one says the tool itself can be wrong, and that's on the user to verify, not assume away.
+# in one sitting: every command that produces a risk/yield judgment (scan, range, recommend,
+# rebalance-check) must say, every time, that this tool's output is a model's estimate from
+# actively-developed code, not a verified fact -- distinct from MODEL_APY_CAVEAT (il_model.py),
+# which explains why one specific number can be wrong; this one says the tool itself can be
+# wrong, and that's on the user to verify, not assume away.
 DYOR_DISCLAIMER = ("This tool's numbers come from an automated model, not a human review, and "
-                    "the code itself is under active development -- two real calculation bugs "
-                    "were found and fixed in a single session of real usage (see README "
-                    "\"Recently shipped\"). Nothing here is financial advice or a guarantee. "
-                    "Always DYOR (do your own research) and verify independently before "
-                    "depositing real funds -- treat every figure as a model's estimate, not a "
-                    "fact.")
+                    "the code itself is under active development. Nothing here is financial "
+                    "advice or a guarantee. Always DYOR (do your own research) and verify "
+                    "independently before depositing real funds -- treat every figure as a "
+                    "model's estimate, not a fact.")
 
 INTERVAL_TO_ANNUALIZATION = {
     "1d": DAYS_PER_YEAR,

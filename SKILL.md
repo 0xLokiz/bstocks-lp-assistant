@@ -52,9 +52,9 @@ OHLC estimator for stablecoin-quoted pools, close-to-close ratio for
 non-stablecoin pairs), prices that risk properly, and nets it out of the
 pool's APY before ranking, using `riskscreen.py` in this directory.
 `no_exit_probability` uses the exact double-barrier reflection-series
-solution, not an approximation — see README "The idea" / "Recently shipped"
-for both, including how the reflection formula was validated (Monte Carlo,
-not just derived from memory) before shipping.
+solution, not an approximation — see README "The idea" and MODEL.md §6.2
+for the derivation, validated against direct Monte Carlo path simulation
+in the test suite.
 
 ## Scope: bStocks only
 
