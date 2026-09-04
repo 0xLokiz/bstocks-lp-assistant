@@ -351,7 +351,8 @@ python riskscreen.py vol --ticker TSLA --days 30 --apy 0.30
 
 # --- 排名/建议（需要已登录的 `baw` 会话）---
 python riskscreen.py scan --top 15 [--with-range] [--json] [--capital 10000] [--allow-v4 "理由"]
-  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5] [--min-peer-sample 3]
+  [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000] [--peer-outlier-multiple 5]
+  [--min-peer-sample 3] [--min-security-score 50]
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "理由"]
   [--target-offset 0.15] [--band-width 0.10] [--capital 10000]
 python riskscreen.py range --ticker TSLA --apy 0.30 --side sell   # 不查真实池子也行

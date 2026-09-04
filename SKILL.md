@@ -103,10 +103,19 @@ from grade/flags/vol_ratio yourself:
   failure to relay to the user apologetically** — it's the model doing its
   job when the market genuinely doesn't offer a clean opportunity right
   now.
-- **`UNSCOREABLE`** — never evaluated at all (fetch failed, no confirmed
-  bStock, insufficient kline data). **Never present this as if it were a
-  safety verdict** — "we don't know" and "we checked, it's not worth it"
-  are different claims. If too much of the market is `UNSCOREABLE`,
+- **`UNSCOREABLE`** — either never evaluated at all (fetch failed, no
+  confirmed bStock, insufficient kline data), *or* volatility too extreme
+  for the diffusion IL approximation to stay valid (past `σ ≈ 283%`
+  annualized — routine for a handful of pools most scans, not rare: DJT/
+  MSTR/FLNC-style tokens show up this way regularly). The second case did
+  have real volatility/apy data; the model's own formula just can't
+  produce a number past that point, so it reports `N/A` rather than a
+  false-precision guess — check the `reason` string (in `--json`, or the
+  text explanation) rather than assuming "unscoreable" always means
+  "missing data." **Never present either case as if it were a safety
+  verdict** — "we don't know"/"the model can't compute this" and "we
+  checked, it's not worth it" are different claims. If too much of the
+  market is `UNSCOREABLE`,
   `recommend` refuses to give any verdict at all rather than picking from
   an unrepresentative scoreable remainder — relay that refusal plainly,
   don't paper over it with whatever partial results exist.
@@ -217,14 +226,19 @@ Two distinct use cases, both handled by `riskscreen.py range --side ...`:
 
 **`--side straddle`** (default) — the range straddles the current price
 (`Pa < 1 < Pb`): ordinary concentrated-liquidity market-making. `p_active`
-is the probability of **never exiting** the range over the period — a
-conservative (safe-direction) union-bound approximation
-(`1 - P(touch Pa) - P(touch Pb)`), since the exact double-barrier
-first-passage probability needs an infinite reflection series. This can
-read `0%` for narrow ranges on volatile tokens even when the true
-no-exit probability is a small positive number — that's the bound being
-loose, not a claim of literal impossibility; say so if a user pushes on a
-`0%` reading.
+is the probability of **never exiting** the range over the period, via the
+**exact double-barrier reflection-series solution**
+(`_exact_double_barrier_no_exit_probability`, method-of-images, truncated
+to machine precision — not an approximation), validated against direct
+Monte Carlo path simulation in the test suite. A looser union-bound
+approximation (`1 - P(touch Pa) - P(touch Pb)`) is kept only as a fallback
+for degenerate/edge inputs where `Pa < 1 < Pb` doesn't hold — it used to
+be the only method, and used to read `0%` for narrow ranges on volatile
+tokens even when the true probability was a small positive number; that
+specific failure mode is fixed now that the exact formula is the normal
+path. Don't wave away a low `p_active` reading as "just a loose bound" —
+for a straddling range it's the precise computed value, and if it's low,
+the range genuinely is unlikely to stay active.
 
 **`--side sell` / `--side buy`** — the range sits entirely on one side of
 the current price (`Pa ≥ 1` or `Pb ≤ 1`): this is a **yield-enhanced limit
@@ -496,7 +510,7 @@ python riskscreen.py vol --ticker <TICKER> [--days 30] [--apy 0.30]
 # rank stock-token LP pools by vol_ratio / net APY (needs signed-in baw session)
 python riskscreen.py scan --top 15 [--json] [--with-range] [--capital 10000] [--allow-v4 "REASON"]
   [--max-pages 3] [--max-fee-rate 0.05] [--min-tvl 5000]
-  [--peer-outlier-multiple 5] [--min-security-score 50]
+  [--peer-outlier-multiple 5] [--min-peer-sample 3] [--min-security-score 50]
 
 # range-by-range IL/APY breakdown + recommended range for one pool
 python riskscreen.py range --investmentId <id> [--side straddle|sell|buy] [--allow-v4 "REASON"]
@@ -541,7 +555,7 @@ at roughly this price" directly, instead of making the user interpret which
 of the preset ±5/10/20/30/50% rows is closest to what they meant.
 
 **Threshold flags on `scan`** (`--max-fee-rate`, `--min-tvl`,
-`--peer-outlier-multiple`, `--min-security-score`) let a user loosen or
+`--peer-outlier-multiple`, `--min-peer-sample`, `--min-security-score`) let a user loosen or
 tighten the pre-deposit screen's strictness. Defaults are reasonable; only
 change them if the user explicitly asks for a stricter or looser screen —
 don't silently loosen a threshold just because nothing passed the default one.
@@ -611,15 +625,26 @@ Signals, current set:
 |---|---|---|
 | `feeRate` > 5%/swap | is the yield real? | a dynamic/keeper-priced fee read (see below) that a static-rate annualization can't handle |
 | TVL < $5,000 | is the yield real? | statistically noisy apy from too little liquidity |
-| apy > 5x peer median (same ticker) | is the yield real? | **the general case** — any mechanism producing an implausible apy, known or not |
+| apy > 5x peer median, ≥3 same-ticker peers | is the yield real? | **the general case** — any mechanism producing an implausible apy, known or not |
 | `investable = false` | is it safe? | delisted product, no new deposits possible |
 | protocol `securityScore` < 50 | is it safe? | obviously disreputable protocols (weak floor — see limitation below) |
-| protocol name contains "V4" | is it safe? | **hard block by default** — unknown hook risk, see "Uniswap V4 pools are hard-blocked" above |
+| protocol is V4-generation (`defiProtocolId`) | is it safe? | **hard block by default** — unknown hook risk, see "Uniswap V4 pools are hard-blocked" above |
 
-The peer-outlier check is the important one to reason about like an
-assistant, not a rule-follower: it's what would have caught the QQQB-USDC
-case (Uniswap V4, `apy=1658.77%` vs. 77.86% on the equivalent V3 pool, 21x
-the peer median) even without knowing the specific cause in advance — a
+**The peer-outlier check needs enough peers before its median means
+anything** — `--min-peer-sample` (default 3) sets that floor. Confirmed
+live as a real false-positive source, not a hypothetical: a GMEB-USDT
+pool was flagged as "6.0x the median" against its *only* same-ticker
+peer, whose own apy had itself moved 84.7% → 123.20% within the same
+session — with one peer, "N times the median" is really just "N times
+one other pool," and you can't tell which of the two is the actual
+outlier. Below the 3-peer floor the check simply doesn't fire for that
+pool; other independent signals (feeRate, TVL, V4 block) still apply.
+
+The peer-outlier check is otherwise the important one to reason about
+like an assistant, not a rule-follower: it's what would have caught the
+QQQB-USDC case (Uniswap V4, `apy=1658.77%` vs. 77.86% on the equivalent
+V3 pool, 21x the peer median, well past the 3-peer floor) even without
+knowing the specific cause in advance — a
 `feeRate` check only catches *that* mechanism; a peer-relative check catches
 *any* mechanism that produces an outlier. When you notice a new failure
 mode this set doesn't cover, the fix is another independent signal in
