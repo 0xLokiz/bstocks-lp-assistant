@@ -13,9 +13,29 @@ a sharp desk analyst would in a Slack DM, not the way a whitepaper would.
 - **Lead with the answer.** First line is the verdict (a grade, a
   recommended range, a yes/no on rebalancing), not a restatement of what
   you're about to compute or which flags you passed.
-- **Chart first, prose second.** Whenever `scan`/`range` produces a
-  candidate set, show it as a chart before any text — see "Visualizing
-  results". Keep any accompanying text to 2-3 sentences.
+- **Chart first, prose second — mandatory, not situational.** Whenever
+  `scan`/`range`/`recommend`/`rebalance-check` produces a candidate set or
+  a ranked list of pools, render a chart (Artifact tool or the visualize
+  widget) before any text, every single time — not only when the user
+  asks for one, not only for a "large enough" result. A markdown table
+  alone is not a substitute and does not satisfy this — confirmed in
+  practice: a user had to explicitly call out "you still haven't given me
+  a picture" after a `scan` reply that was table-only. See "Visualizing
+  results" for exactly what to draw for each command. Keep any
+  accompanying text to 2-3 sentences.
+- **`--json`'s `apy`, `model_net_apy`, `sigma_annual`, and `expected_il` are
+  decimals, not percentage points — multiply by 100 before showing a `%`
+  sign, every time, in prose, tables, and chart axes/labels alike.**
+  `0.30` means 30%, and `apyBps: 46855` on a real pool meant `apyDisplay:
+  "468.55%"` (i.e. the decimal was `4.6855`) — confirmed live as a real
+  mistake, not a hypothetical: a `--json` scan reply that skipped the ×100
+  step showed single-digit percentages for pools the underlying API
+  itself reports at 100s or 1,000s of percent, and the user (who already
+  knew the real figures) called it out immediately. `vol_ratio` is the one
+  exception — it's already a dimensionless ratio, never a percentage, and
+  never gets multiplied. Text-mode (non-`--json`) output already does this
+  conversion for you (every `*100` in `cli.py`'s print statements); only
+  `--json` consumers need to do it themselves.
 - **Speak in grades, not decimals, by default.** Lead with Richness Score
   (Rich/Fair/Cheap) and confidence (High/Moderate/Low) — the tiers `scan`/
   `range` already print. Surface a raw number (`vol_ratio`, `p_active`) only
@@ -287,6 +307,19 @@ nets exactly this trade-off) over eyeballing the `il` column in
 isolation.
 
 ## Visualizing results
+
+**This section is mandatory, not a style option.** Every `scan`/`range`/
+`recommend`/`rebalance-check` reply that presents a candidate set or a
+ranked list of pools gets a chart, every time, before the prose — see
+"Communication style" above. Skipping the chart because the answer "seems
+simple enough for a table" is exactly the failure mode this line exists
+to prevent.
+
+**Convert `apy`/`model_net_apy`/`sigma_annual`/`expected_il` to percent
+(×100) before computing any axis range, tick, bubble label, or position —
+see "Communication style" above. Plotting the raw `--json` decimal
+directly produces a chart that's off by 100x, silently — every number and
+coordinate in it is wrong, not just the printed label.**
 
 Use the Artifact tool or the visualize widget (see the `dataviz` skill for
 house style):
